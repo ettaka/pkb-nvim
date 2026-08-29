@@ -26,23 +26,46 @@ end
 ---------------------------------------------------------------
 -- PARSE LINE
 ---------------------------------------------------------------
-local function parse_line(notifications, line, line_num, file, new_state)
+local function parse_line(notifications, line, line_num, file, new_state, is_in_code_block)
+  -- 1. Bail out immediately if we are reading inside a markdown code block
+  if is_in_code_block then return end
+
+  -- 2. Detect and skip documentation lines or template examples completely
+  -- This skips lines containing [Z/H...], YYYY-MM-DD, or template brackets
+  if line:match("%[Z/H") or line:match("YYYY%-MM%-DD") or line:match("due::.*%[.*%]") then
+    return
+  end
+
+  -- 3. Extract the raw due string tag (stops matching at spaces)
   local due_str = line:match("due::([^%s]+)")
   if not due_str then return end
 
-  local notify_str = line:match("notify::([%w]+)") or M.DEFAULT_NOTIFY
-  local due_ts = parse_iso(due_str)
-  if not due_ts then return end
-
-  local notify_ts = due_ts - M.parse_notify(notify_str)
-  if not line_num then 
-      return 
+  -- 4. Clean trailing punctuation from due_str copy for validation check
+  local clean_due_str = due_str:match("^([%w%-%+:]+)") or due_str
+  local due_ts = parse_iso(clean_due_str)
+  
+  if not due_ts then
+    -- A real mistake was found on an intended user line: print warning
+    vim.notify(
+      string.format("[PKB Notify] Invalid date configuration '%s' in file: %s (Line %s)", due_str, file, tostring(line_num)),
+      vim.log.levels.WARN
+    )
+    
+    -- Assign a safe placeholder timestamp far in the future
+    due_ts = os.time() + 99999999 
   end
+
+  -- 5. Read notification configurations
+  local notify_str = line:match("notify::([%w]+)") or M.DEFAULT_NOTIFY
+  local notify_ts = due_ts - M.parse_notify(notify_str)
+  
+  if not line_num then return end
   local id = string.format("%s:%d", file, line_num)
 
   -- Preserve existing state across rescans
   local existing = notifications[id]
 
+  -- 6. Construct and save the entry state safely
   new_state[id] = {
     id = id,
     line = line,
@@ -59,8 +82,14 @@ end
 local function scan_file(notifications, file, new_state)
   local ok, lines = pcall(vim.fn.readfile, file)
   if not ok then return end
+
+  local is_in_code_block = false
   for line_num, line in ipairs(lines) do
-    parse_line(notifications, line, line_num, file, new_state)
+    -- Detect start or end of markdown code blocks
+    if line:match("^%s*```") then
+      is_in_code_block = not is_in_code_block
+    end
+    parse_line(notifications, line, line_num, file, new_state, is_in_code_block)
   end
 end
 
