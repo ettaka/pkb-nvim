@@ -249,7 +249,15 @@ function M.calculate_next_due_advanced(current_ts, recur_str)
 
   -- Check for expressions like: "1st_tue", "2nd_wed", "last_fri"
   local nth_str, day_str = recur_str:match("^(%w+)_(%a+)$")
-  if nth_str and day_str and weekday_map[day_str:lower()] then
+  if nth_str and day_str then
+    if not weekday_map[day_str:lower()] then
+      vim.notify(
+        string.format("[PKB Notify] Invalid weekday '%s' in recurrence rule '%s'", day_str, recur_str),
+        vim.log.levels.WARN
+      )
+      return current_ts + 86400 -- fallback advance by 1 day to prevent hanging
+    end
+    
     local target_wday = weekday_map[day_str:lower()]
     local nth = nil
 
@@ -258,6 +266,12 @@ function M.calculate_next_due_advanced(current_ts, recur_str)
     elseif nth_str == "3rd" then nth = 3
     elseif nth_str == "4th" then nth = 4
     elseif nth_str == "last" then nth = -1
+    else
+      vim.notify(
+        string.format("[PKB Notify] Invalid ordinal '%s' in recurrence rule '%s'", nth_str, recur_str),
+        vim.log.levels.WARN
+      )
+      return current_ts + 86400
     end
 
     if nth then
