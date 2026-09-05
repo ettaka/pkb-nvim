@@ -77,9 +77,9 @@ local function format_effort(seconds)
   return table.concat(parts, " ")
 end
 
-function M.render_inbox(notifications, inbox_show_all, buf)
+function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf)
   -- Forecast/expand recurring tasks up to 90 days ahead in the inbox view
-  local horizon_ts = os.time() + (90 * 86400)
+  local horizon_ts = os.time() + horizon_duration
   local raw_items = parser.expand_recurring_tasks(notifications, horizon_ts)
   
   local items = {}

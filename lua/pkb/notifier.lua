@@ -9,6 +9,7 @@ local M = {}
 M.DEFAULT_NOTIFY = "15min"
 M.POLL_INTERVAL = 30000        -- Poll every 30 seconds (ms)
 M.SNOOZE_INTERVAL = 30 * 60    -- Auto-snooze for 30 minutes (seconds) when closed with [q]
+M.DEFAULT_HORIZON = 90 * 86400
 
 function M.setup(opts)
   opts = opts or {}
@@ -26,6 +27,9 @@ function M.setup(opts)
   end
   if opts.snooze_interval then
     M.SNOOZE_INTERVAL = opts.snooze_interval
+  end
+  if opts.default_horizon then
+    M.DEFAULT_HORIZON = opts.default_horizon * 86400
   end
 end
 
@@ -198,7 +202,7 @@ function M.inbox()
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
 
-  render_inbox(M.notifications, M.inbox_show_all, buf)
+  render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
   vim.api.nvim_set_current_buf(buf)
 
   -- d → dismiss
@@ -206,7 +210,7 @@ function M.inbox()
     local n = get_notification_at_cursor(buf)
     if n then
       n.dismissed = true
-      render_inbox(M.notifications, M.inbox_show_all, buf)
+      render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
     end
   end, { buffer = buf })
 
@@ -224,7 +228,7 @@ function M.inbox()
   -- t → toggle view
   vim.keymap.set("n", "t", function()
     M.inbox_show_all = not M.inbox_show_all
-    render_inbox(M.notifications, M.inbox_show_all, buf)
+    render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
   end, { buffer = buf })
 
   -- q → close
@@ -237,7 +241,7 @@ function M.inbox()
     local n = get_notification_at_cursor(buf)
     if n then
       M.complete_task(n)
-      render_inbox(M.notifications, M.inbox_show_all, buf)
+      render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
     end
   end, { buffer = buf })
 end
