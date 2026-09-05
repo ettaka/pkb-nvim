@@ -1,6 +1,8 @@
 local M = {}
 
 local notifier = require("pkb.notifier")
+local parser = require("pkb.parser")
+
 
 --- Extract effort tag (`effort::<value><unit>`) from a task line and return duration in hours.
 --- Supports: `min` (minutes), `h` (hours), `day` (days).
@@ -36,16 +38,15 @@ local function get_effort_hours(line)
 end
 
 --- Retrieves total planned task duration in hours for a specific date (year, month, day)
---- @param year number e.g. 2026
---- @param month number e.g. 8
---- @param day number e.g. 16
---- @return number Total effort in hours
 function M.get_tasks_duration(year, month, day)
   local target_date = string.format("%04d-%02d-%02d", year, month, day)
   local total_hours = 0
 
-  for _, entry in pairs(notifier.notifications or {}) do
-    -- Skip completed tasks (- [x] / - [X])
+  -- Define a horizon of 90 days ahead for forecasting recurring effort
+  local horizon_ts = os.time() + (90 * 86400)
+  local all_entries = parser.expand_recurring_tasks(notifier.notifications or {}, horizon_ts)
+
+  for _, entry in ipairs(all_entries) do
     local is_done = entry.line and entry.line:match("^%s*%- %[[xX]%]")
     if not is_done and entry.due_ts then
       local entry_date = os.date("%Y-%m-%d", entry.due_ts)

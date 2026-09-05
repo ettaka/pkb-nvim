@@ -1,5 +1,7 @@
 local M = {}
 
+local parser = require("pkb.parser")
+
 M._line_map = M._line_map or {}
 
 -- Return effort in seconds from an effort::... tag in n.line.
@@ -76,9 +78,12 @@ local function format_effort(seconds)
 end
 
 function M.render_inbox(notifications, inbox_show_all, buf)
+  -- Forecast/expand recurring tasks up to 90 days ahead in the inbox view
+  local horizon_ts = os.time() + (90 * 86400)
+  local raw_items = parser.expand_recurring_tasks(notifications, horizon_ts)
+  
   local items = {}
-
-  for _, n in pairs(notifications) do
+  for _, n in ipairs(raw_items) do
     if not n.line:match("^%s*%- %[[xX]%]") then
       if inbox_show_all or not n.dismissed then
         table.insert(items, n)

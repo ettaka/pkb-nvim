@@ -110,6 +110,38 @@ function M.scan_dir(notifications, path, new_state)
   end
 end
 
+--- Expand recurring tasks up to a given horizon timestamp
+--- @param notifications table Map of notifications
+--- @param horizon_ts number Epoch timestamp horizon
+--- @return table List of all entries including virtual recurring instances
+function M.expand_recurring_tasks(notifications, horizon_ts)
+  local expanded = {}
+
+  for id, entry in pairs(notifications) do
+    table.insert(expanded, entry)
+
+    local recur_str = M.parse_recurrence(entry.line)
+    if recur_str and entry.due_ts then
+      local current_ts = entry.due_ts
+      while true do
+        current_ts = M.calculate_next_due_advanced(current_ts, recur_str)
+        if current_ts > horizon_ts then
+          break
+        end
+
+        local virtual_entry = vim.tbl_deep_extend("force", {}, entry, {
+          id = id .. "_" .. current_ts,
+          due_ts = current_ts,
+          is_virtual = true,
+        })
+        table.insert(expanded, virtual_entry)
+      end
+    end
+  end
+
+  return expanded
+end
+
 -- In lua/pkb/parser.lua
 
 --- Parse recur::<value> tag from line (e.g. recur::daily, recur::3d, recur::1w, recur::1m)
