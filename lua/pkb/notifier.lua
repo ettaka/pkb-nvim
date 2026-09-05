@@ -119,8 +119,17 @@ end
 function M.complete_task(entry)
   if not entry or not entry.file or not entry.line_num then return end
 
-  local ok, lines = pcall(vim.fn.readfile, entry.file)
-  if not ok or not lines[entry.line_num] then return end
+  local lines
+  local bufnr = vim.fn.bufnr(entry.file)
+  if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) and vim.bo[bufnr].modified then
+    lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  else
+    local ok
+    ok, lines = pcall(vim.fn.readfile, entry.file)
+    if not ok or not lines[entry.line_num] then return end
+  end
+
+  if not lines[entry.line_num] then return end
 
   local original_line = lines[entry.line_num]
   local due_str = original_line:match("due::([^%s]+)")
@@ -151,15 +160,17 @@ function M.complete_task(entry)
     table.insert(lines, entry.line_num + 1, next_line)
   end
 
-  -- Write changes back to file
-  vim.fn.writefile(lines, entry.file)
-
-  -- Reload current buffer if open in Neovim
-  local bufnr = vim.fn.bufnr(entry.file)
+  -- Write changes back to file or update open buffer
   if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
-    vim.api.nvim_buf_call(bufnr, function()
-      vim.cmd("edit!")
-    end)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  else
+    vim.fn.writefile(lines, entry.file)
+    local reloaded_bufnr = vim.fn.bufnr(entry.file)
+    if reloaded_bufnr ~= -1 and vim.api.nvim_buf_is_loaded(reloaded_bufnr) then
+      vim.api.nvim_buf_call(reloaded_bufnr, function()
+        vim.cmd("edit!")
+      end)
+    end
   end
 
   -- Mark as dismissed in memory and rescan
