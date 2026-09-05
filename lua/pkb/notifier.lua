@@ -137,7 +137,7 @@ function M.complete_task(entry)
 
   -- 2. If task is recurring, calculate next due date and append new active task
   if recur_str and entry.due_ts then
-    local next_ts = parser.calculate_next_due(entry.due_ts, recur_str)
+    local next_ts = parser.calculate_next_due_advanced(entry.due_ts, recur_str)
     local next_iso = require('timestamps.actions').get_timestamp(next_ts)
 
     -- Construct new task line with next due date and original recur tag

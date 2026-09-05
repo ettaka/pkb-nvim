@@ -117,20 +117,85 @@ end
 --- @return string|nil
 function M.parse_recurrence(line)
   line = tostring(line or "")
-  return line:match("recur::([%w]+)")
+  return line:match("recur::([%w_]+)")
+end
+
+local weekday_map = {
+  sun = 1, sunday = 1,
+  mon = 2, monday = 2,
+  tue = 3, tuesday = 3,
+  wed = 4, wednesday = 4,
+  thu = 5, thursday = 5,
+  fri = 6, friday = 6,
+  sat = 7, saturday = 7,
+}
+
+--- Get epoch timestamp for the N-th occurrence of a weekday in a given month/year
+--- @param year number e.g. 2026
+--- @param month number 1-12
+--- @param target_wday number 1=Sun, 2=Mon, ..., 7=Sat
+--- @param nth number 1=1st, 2=2nd, 3=3rd, 4=4th, -1=last
+--- @param ref_date table Standard date table containing hour, min, sec to preserve time
+--- @return number Epoch timestamp
+local function get_nth_weekday_of_month(year, month, target_wday, nth, ref_date)
+  if nth > 0 then
+    -- Find the 1st day of the month
+    local first_day_ts = os.time({ year = year, month = month, day = 1, hour = 12 })
+    local first_wday = os.date("*t", first_day_ts).wday
+
+    -- Calculate first matching weekday of month
+    local day_offset = (target_wday - first_wday) % 7
+    local day_of_month = 1 + day_offset + (nth - 1) * 7
+
+    return os.time({
+      year = year,
+      month = month,
+      day = day_of_month,
+      hour = ref_date.hour,
+      min = ref_date.min,
+      sec = ref_date.sec,
+    })
+  else
+    -- Negative nth (e.g. -1 for last weekday of month)
+    -- Find day 0 of next month (which is last day of current month)
+    local last_day_ts = os.time({ year = year, month = month + 1, day = 0, hour = 12 })
+    local last_date = os.date("*t", last_day_ts)
+    local last_wday = last_date.wday
+
+    local day_offset = (last_wday - target_wday) % 7
+    local day_of_month = last_date.day - day_offset - (math.abs(nth) - 1) * 7
+
+    return os.time({
+      year = year,
+      month = month,
+      day = day_of_month,
+      hour = ref_date.hour,
+      min = ref_date.min,
+      sec = ref_date.sec,
+    })
+  end
 end
 
 --- Calculate the next due epoch timestamp based on recur rule
 --- @param current_ts number Epoch timestamp
---- @param recur_str string e.g. "3d", "daily", "1w", "1m"
+--- @param recur_str string e.g. "3d", "daily", "biweekly", "1w", "1m", "yearly"
 --- @return number Next epoch timestamp
 function M.calculate_next_due(current_ts, recur_str)
   local num, unit = recur_str:match("^(%d*)(%a+)$")
   num = tonumber(num) or 1
 
-  if unit == "daily" then unit = "d" end
-  if unit == "weekly" then unit = "w" end
-  if unit == "monthly" then unit = "m" end
+  -- Preset aliases
+  if unit == "daily" then unit = "d"
+  elseif unit == "weekly" then unit = "w"
+  elseif unit == "biweekly" or unit == "fortnightly" then
+    num = 2
+    unit = "w"
+  elseif unit == "monthly" then unit = "m"
+  elseif unit == "bimonthly" then
+    num = 2
+    unit = "m"
+  elseif unit == "yearly" or unit == "annually" then unit = "y"
+  end
 
   local date_tbl = os.date("*t", current_ts)
 
@@ -140,9 +205,48 @@ function M.calculate_next_due(current_ts, recur_str)
     date_tbl.day = date_tbl.day + (num * 7)
   elseif unit == "m" then
     date_tbl.month = date_tbl.month + num
+  elseif unit == "y" then
+    date_tbl.year = date_tbl.year + num
   end
 
   return os.time(date_tbl)
+end
+
+function M.calculate_next_due_advanced(current_ts, recur_str)
+  local current_date = os.date("*t", current_ts)
+
+  -- Check for expressions like: "1st_tue", "2nd_wed", "last_fri"
+  local nth_str, day_str = recur_str:match("^(%w+)_(%a+)$")
+  if nth_str and day_str and weekday_map[day_str:lower()] then
+    local target_wday = weekday_map[day_str:lower()]
+    local nth = nil
+
+    if nth_str == "1st" then nth = 1
+    elseif nth_str == "2nd" then nth = 2
+    elseif nth_str == "3rd" then nth = 3
+    elseif nth_str == "4th" then nth = 4
+    elseif nth_str == "last" then nth = -1
+    end
+
+    if nth then
+      -- Target next month (or current month if today is before the occurrence)
+      local next_month = current_date.month + 1
+      local next_year = current_date.year
+
+      local candidate_ts = get_nth_weekday_of_month(current_date.year, current_date.month, target_wday, nth, current_date)
+      
+      -- If candidate timestamp is still in the future, return it
+      if candidate_ts > current_ts then
+        return candidate_ts
+      end
+
+      -- Otherwise move to next month
+      return get_nth_weekday_of_month(next_year, next_month, target_wday, nth, current_date)
+    end
+  end
+
+  -- Fallback to standard units (d, w, m, y, biweekly)
+  return M.calculate_next_due(current_ts, recur_str)
 end
 
 return M
