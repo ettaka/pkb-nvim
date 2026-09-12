@@ -125,6 +125,47 @@ local function start_timer()
   end
 end
 
+local function log_to_daily_note(entry, completed_line)
+  if not M.PKB_ROOT then return end
+
+  local date_str = os.date("%Y-%m-%d", entry.due_ts)
+  local note_path = M.PKB_ROOT .. "/" .. date_str .. ".md"
+
+  local lines = {}
+  if vim.fn.filereadable(note_path) == 1 then
+    lines = vim.fn.readfile(note_path)
+  else
+    table.insert(lines, "# " .. date_str)
+    table.insert(lines, "")
+    table.insert(lines, "# morning")
+    table.insert(lines, "")
+    table.insert(lines, "# afternoon")
+    table.insert(lines, "")
+    table.insert(lines, "# evening")
+    table.insert(lines, "")
+  end
+
+  local current_hour = tonumber(os.date("%H"))
+  local target_section = "morning"
+  if current_hour >= 12 and current_hour < 18 then
+    target_section = "afternoon"
+  elseif current_hour >= 18 then
+    target_section = "evening"
+  end
+
+  local section_idx, insert_idx = parser.find_log_insertion_index(lines, target_section)
+
+  if section_idx and insert_idx then
+    table.insert(lines, insert_idx, "- " .. completed_line)
+  else
+    table.insert(lines, "")
+    table.insert(lines, target_section)
+    table.insert(lines, "- " .. completed_line)
+  end
+
+  vim.fn.writefile(lines, note_path)
+end
+
 --- Completes a task by changing due:: -> old::, appending done::, and spawning the next instance if recurring.
 --- @param entry table Notification entry object
 function M.complete_task(entry)
@@ -164,6 +205,7 @@ function M.complete_task(entry)
 
   -- Write changes back to file
   vim.fn.writefile(lines, entry.file)
+  log_to_daily_note(entry, completed_line)
 
   -- Reload current buffer if open in Neovim
   local bufnr = vim.fn.bufnr(entry.file)

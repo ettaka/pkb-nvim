@@ -295,4 +295,31 @@ function M.calculate_next_due_advanced(current_ts, recur_str)
   return M.calculate_next_due(current_ts, recur_str)
 end
 
+function M.find_log_insertion_index(lines, target_section)
+  local section_idx = nil
+  local insert_idx = #lines + 1
+
+  for i, line in ipairs(lines) do
+    if line:match("^#%s+" .. target_section .. "$") then
+      section_idx = i
+      break
+    end
+  end
+
+  if section_idx then
+    for i = section_idx + 1, #lines do
+      if lines[i]:match("^#+%s+") then
+        insert_idx = i
+        break
+      end
+    end
+    while insert_idx > section_idx + 1 and lines[insert_idx - 1] == "" do
+      insert_idx = insert_idx - 1
+    end
+    return section_idx, insert_idx
+  end
+
+  return nil, nil
+end
+
 return M
