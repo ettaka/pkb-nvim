@@ -220,6 +220,56 @@ function M.complete_task(entry)
   M.notify()
 end
 
+--- Skips a task. For recurring tasks, archives the current instance as `skipped::` and creates
+--- the next occurrence. For non-recurring tasks, defers the due date by 1 day (or archives as skipped).
+--- @param entry table Notification entry object
+function M.skip_task(entry)
+  if not entry or not entry.file or not entry.line_num then return end
+
+  local ok, lines = pcall(vim.fn.readfile, entry.file)
+  if not ok or not lines[entry.line_num] then return end
+
+  local original_line = lines[entry.line_num]
+  local due_str = original_line:match("due::([^%s]+)")
+  if not due_str then return end
+
+  local now_iso = require('timestamps.actions').get_timestamp_now()
+  local recur_str = parser.parse_recurrence(original_line)
+
+  if recur_str and entry.due_ts then
+    -- 1. Archive current recurring instance as skipped
+    local skipped_line = original_line:gsub("due::" .. vim.pesc(due_str), "old::" .. due_str)
+    skipped_line = skipped_line:gsub("%s*recur::" .. vim.pesc(recur_str), "")
+    skipped_line = skipped_line .. " skipped::" .. now_iso
+    lines[entry.line_num] = skipped_line
+
+    -- 2. Spawn next recurrence instance
+    local next_ts = parser.calculate_next_due_advanced(entry.due_ts, recur_str)
+    local next_iso = require('timestamps.actions').get_timestamp(next_ts)
+    local next_line = original_line:gsub("due::" .. vim.pesc(due_str), "due::" .. next_iso)
+    table.insert(lines, entry.line_num + 1, next_line)
+  else
+    -- For non-recurring tasks, advance due date by 1 day (24 hours)
+    local next_ts = (entry.due_ts or os.time()) + 86400
+    local next_iso = require('timestamps.actions').get_timestamp(next_ts)
+    lines[entry.line_num] = original_line:gsub("due::" .. vim.pesc(due_str), "due::" .. next_iso)
+  end
+
+  -- Write changes back to file
+  vim.fn.writefile(lines, entry.file)
+
+  -- Reload current buffer if loaded in Neovim
+  local bufnr = vim.fn.bufnr(entry.file)
+  if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
+    vim.api.nvim_buf_call(bufnr, function()
+      vim.cmd("edit!")
+    end)
+  end
+
+  -- Rescan notifications
+  M.notify()
+end
+
 ---------------------------------------------------------------
 -- COMMANDS & PUBLIC API
 ---------------------------------------------------------------
@@ -308,6 +358,18 @@ function M.inbox()
     if n then
       M.complete_task(n)
       render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
+<<<<<<< Updated upstream
+=======
+    end
+  end, { buffer = buf })
+
+  -- s → skip task
+  vim.keymap.set("n", "s", function()
+    local n = get_notification_at_cursor(buf)
+    if n then
+      M.skip_task(n)
+      render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
+>>>>>>> Stashed changes
     end
   end, { buffer = buf })
 end
