@@ -358,8 +358,6 @@ function M.inbox()
     if n then
       M.complete_task(n)
       render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
-<<<<<<< Updated upstream
-=======
     end
   end, { buffer = buf })
 
@@ -369,7 +367,6 @@ function M.inbox()
     if n then
       M.skip_task(n)
       render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
->>>>>>> Stashed changes
     end
   end, { buffer = buf })
 end
