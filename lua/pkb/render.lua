@@ -77,6 +77,40 @@ local function format_effort(seconds)
   return table.concat(parts, " ")
 end
 
+local function find_conflicts(items)
+  local conflicts = {}
+  -- Group items by date
+  local by_date = {}
+  for _, item in ipairs(items) do
+    local date = os.date("%Y-%m-%d", item.due_ts)
+    by_date[date] = by_date[date] or {}
+    table.insert(by_date[date], item)
+  end
+
+  for _, date_items in pairs(by_date) do
+    for i = 1, #date_items do
+      for j = i + 1, #date_items do
+        local a, b = date_items[i], date_items[j]
+        local a_start = a.due_ts
+        local a_effort = get_effort_seconds(a)
+        local a_end = a_start + (a_effort > 0 and a_effort or 1800) -- default to 30 mins if no effort specified
+
+        local b_start = b.due_ts
+        local b_effort = get_effort_seconds(b)
+        local b_end = b_start + (b_effort > 0 and b_effort or 1800)
+
+        -- Check overlap: max(start_a, start_b) < min(end_a, end_b)
+        if math.max(a_start, b_start) < math.min(a_end, b_end) then
+          conflicts[a.id] = true
+          conflicts[b.id] = true
+        end
+      end
+    end
+  end
+
+  return conflicts
+end
+
 function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf)
   -- Forecast/expand recurring tasks up to 90 days ahead in the inbox view
   local horizon_ts = os.time() + horizon_duration
@@ -94,6 +128,8 @@ function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf)
   table.sort(items, function(a, b)
     return a.due_ts < b.due_ts
   end)
+
+  local conflicts = find_conflicts(items)
 
   ----------------------------------------------------------------
   -- First pass: calculate total effort for each date
@@ -144,12 +180,15 @@ function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf)
       n.triggered and "[!]" or
       "[ ]"
 
+    local conflict_badge = conflicts[n.id] and " ⚠️ [CONFLICT]" or ""
+
     table.insert(
       lines,
       string.format(
-        "%s %s | %s | due %s",
+        "%s %s%s | %s | due %s",
         status,
         n.line,
+        conflict_badge,
         n.file,
         os.date("%H:%M", n.due_ts)
       )
