@@ -274,14 +274,21 @@ end
 
 function M.show_next_popup(popup_queue, snooz_interval)
   ----------------------------------------------------------------
-  -- Move everything waiting in the queue into the current batch.
+  -- Move everything waiting in the queue into the current batch,
+  -- ensuring uniqueness by task ID.
   ----------------------------------------------------------------
 
+  local batch_ids = {}
+  for _, entry in ipairs(popup_batch) do
+    batch_ids[entry.id] = true
+  end
+
   while #popup_queue > 0 do
-    table.insert(
-      popup_batch,
-      table.remove(popup_queue, 1)
-    )
+    local entry = table.remove(popup_queue, 1)
+    if not batch_ids[entry.id] then
+      batch_ids[entry.id] = true
+      table.insert(popup_batch, entry)
+    end
   end
 
   if #popup_batch == 0 then
@@ -290,8 +297,6 @@ function M.show_next_popup(popup_queue, snooz_interval)
 
   ----------------------------------------------------------------
   -- If the digest already exists, simply update it.
-  --
-  -- No second floating window is created.
   ----------------------------------------------------------------
 
   if popup_is_valid() then
@@ -304,8 +309,6 @@ function M.show_next_popup(popup_queue, snooz_interval)
   ----------------------------------------------------------------
 
   vim.schedule(function()
-    -- Notifications may have been closed before the scheduled
-    -- callback executes.
     if #popup_batch == 0 then
       return
     end

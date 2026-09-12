@@ -62,6 +62,7 @@ M.inbox_show_all = false
 local function check_notifications()
   local now = os.time()
   local pending_due = {}
+  local seen_ids = {}
 
   for _, entry in pairs(M.notifications) do
     -- Filter out completed markdown checkmarks.
@@ -76,7 +77,12 @@ local function check_notifications()
       if is_due and snooze_expired then
         entry.auto_snoozed_until = nil
         entry.triggered = true
-        table.insert(pending_due, entry)
+        
+        -- Keep only one instance per unique file/task ID in the pending batch
+        if not seen_ids[entry.id] then
+          seen_ids[entry.id] = true
+          table.insert(pending_due, entry)
+        end
       end
     end
   end
@@ -93,12 +99,17 @@ local function check_notifications()
   -- Send consolidated phone notification.
   phone_notify_digest(pending_due, M.DEVICE_IS_PHONE)
 
-  -- Add newly triggered notifications to the Neovim queue.
-  --
-  -- If a digest is already visible, show_next_popup() will append
-  -- these to the existing digest rather than creating another popup.
+  -- Add newly triggered notifications to the Neovim queue (ensuring no duplicates in queue)
+  local queue_ids = {}
+  for _, existing in ipairs(M.popup_queue) do
+    queue_ids[existing.id] = true
+  end
+
   for _, entry in ipairs(pending_due) do
-    table.insert(M.popup_queue, entry)
+    if not queue_ids[entry.id] then
+      queue_ids[entry.id] = true
+      table.insert(M.popup_queue, entry)
+    end
   end
 
   -- Show the digest, or update the existing one.
@@ -119,17 +130,8 @@ end
 function M.complete_task(entry)
   if not entry or not entry.file or not entry.line_num then return end
 
-  local lines
-  local bufnr = vim.fn.bufnr(entry.file)
-  if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) and vim.bo[bufnr].modified then
-    lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  else
-    local ok
-    ok, lines = pcall(vim.fn.readfile, entry.file)
-    if not ok or not lines[entry.line_num] then return end
-  end
-
-  if not lines[entry.line_num] then return end
+  local ok, lines = pcall(vim.fn.readfile, entry.file)
+  if not ok or not lines[entry.line_num] then return end
 
   local original_line = lines[entry.line_num]
   local due_str = original_line:match("due::([^%s]+)")
@@ -160,17 +162,15 @@ function M.complete_task(entry)
     table.insert(lines, entry.line_num + 1, next_line)
   end
 
-  -- Write changes back to file or update open buffer
+  -- Write changes back to file
+  vim.fn.writefile(lines, entry.file)
+
+  -- Reload current buffer if open in Neovim
+  local bufnr = vim.fn.bufnr(entry.file)
   if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
-    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-  else
-    vim.fn.writefile(lines, entry.file)
-    local reloaded_bufnr = vim.fn.bufnr(entry.file)
-    if reloaded_bufnr ~= -1 and vim.api.nvim_buf_is_loaded(reloaded_bufnr) then
-      vim.api.nvim_buf_call(reloaded_bufnr, function()
-        vim.cmd("edit!")
-      end)
-    end
+    vim.api.nvim_buf_call(bufnr, function()
+      vim.cmd("edit!")
+    end)
   end
 
   -- Mark as dismissed in memory and rescan
@@ -186,6 +186,19 @@ function M.notify()
   scan_dir(M.notifications, M.PKB_ROOT, new_state)
 
   M.notifications = new_state
+
+  -- Clean up popup_queue to keep only active, non-dismissed, non-done unique entries
+  local valid_queue = {}
+  local seen_queue_ids = {}
+  for _, entry in ipairs(M.popup_queue) do
+    local fresh = M.notifications[entry.id]
+    local is_done = fresh and fresh.line and fresh.line:match("^%s*%- %[[xX]%]")
+    if fresh and not fresh.dismissed and not is_done and not seen_queue_ids[entry.id] then
+      seen_queue_ids[entry.id] = true
+      table.insert(valid_queue, fresh)
+    end
+  end
+  M.popup_queue = valid_queue
 
   local count = 0
   for _ in pairs(M.notifications) do count = count + 1 end
