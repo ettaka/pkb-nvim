@@ -166,6 +166,25 @@ local function log_to_daily_note(entry, completed_line)
   vim.fn.writefile(lines, note_path)
 end
 
+-- insert a new task ID at cursor
+local function get_task_id()
+  local ts = vim.fn.strftime("%Y-%m-%dT%H:%M")
+  return "task::t-" .. ts
+end
+
+--- Generates a short unique task ID tag if not already present
+local function ensure_task_id(line)
+  local TASK_ID_REGEX = "t%-%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d"
+  local task_id = line:match("task::(".. TASK_ID_REGEX ..")")
+  if task_id then
+    return task_id, line
+  end
+
+  -- Generate a short random/timestamp-based ID (e.g., task::t1710000000_a1b2)
+  local updated_line = line .. " " .. get_task_id()
+  return task_id, updated_line
+end
+
 --- Completes a task by changing due:: -> old::, appending done::, and spawning the next instance if recurring.
 --- @param entry table Notification entry object
 function M.complete_task(entry)
@@ -178,11 +197,14 @@ function M.complete_task(entry)
   local due_str = original_line:match("due::([^%s]+)")
   if not due_str then return end
 
+  -- Ensure the task has a task::<id>
+  local task_id, updated_original_line = ensure_task_id(original_line)
+
   local now_iso = require('timestamps.actions').get_timestamp_now()
-  local recur_str = parser.parse_recurrence(original_line)
+  local recur_str = parser.parse_recurrence(updated_original_line)
 
   -- 1. Transform current line: change due:: to old:: and append done::
-  local completed_line = original_line:gsub("due::" .. vim.pesc(due_str), "old::" .. due_str)
+  local completed_line = updated_original_line:gsub("due::" .. vim.pesc(due_str), "old::" .. due_str)
   if recur_str then
     -- Strip recur:: from completed log entry so history stays clean
     completed_line = completed_line:gsub("%s*recur::" .. vim.pesc(recur_str), "")
@@ -197,7 +219,7 @@ function M.complete_task(entry)
     local next_iso = require('timestamps.actions').get_timestamp(next_ts)
 
     -- Construct new task line with next due date and original recur tag
-    local next_line = original_line:gsub("due::" .. vim.pesc(due_str), "due::" .. next_iso)
+    local next_line = updated_original_line:gsub("due::" .. vim.pesc(due_str), "due::" .. next_iso)
     
     -- Insert new line immediately after completed task
     table.insert(lines, entry.line_num + 1, next_line)
@@ -205,7 +227,12 @@ function M.complete_task(entry)
 
   -- Write changes back to file
   vim.fn.writefile(lines, entry.file)
-  log_to_daily_note(entry, completed_line)
+
+  -- 3. Log to daily note with source file & task::<id> tag (retaining only t-ref for references)
+  local relative_file = vim.fn.fnamemodify(entry.file, ":t")
+  local logged_line = completed_line:gsub("task::(t%-[%w%-%:]+)", "%1")
+  local log_line = string.format("%s (from %s)", logged_line, relative_file)
+  log_to_daily_note(entry, log_line)
 
   -- Reload current buffer if open in Neovim
   local bufnr = vim.fn.bufnr(entry.file)
