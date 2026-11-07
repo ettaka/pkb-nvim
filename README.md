@@ -19,6 +19,34 @@ Keys: `<CR>` open the task, `c` complete, `s` skip, `d` dismiss, `t` show/hide d
 `:PKBInbox 2026-11-12` (or `require("pkb.notifier").open_day(2026, 11, 12)`, which calendar-nvim calls) opens it
 with the cursor on that day; a day without tasks gets an empty section.
 
+## Recurrence
+
+`recur::<rule>` repeats a task; completing or skipping it writes the next instance below it.
+
+- Every N days/weeks/months/years: `3d`, `2w`, `3m`, `1y`, or written out: `day`, `2weeks`, `3months`, `1year`
+  (singular or plural). Presets: `daily`, `weekly`, `biweekly`/`fortnightly`, `monthly`, `bimonthly`, `yearly`/
+  `annually`; a number multiplies them (`3monthly` = every 3 months).
+- N-th weekday of the month: `1st_tue`, `2nd_wed`, `3rd_mon`, `4th_thu`, `last_fri` (full names work too).
+
+Monthly steps from the 29th–31st land on the last day of a shorter month. An unknown rule is reported once and
+the task does not repeat; complete and skip leave such a task unchanged until the tag is fixed.
+
+## Reminders
+
+A task with `due::` pops up in a digest window (and as a phone notification on Termux) `notify::` before it
+is due: 30 min by default, or e.g. `notify::1h` / `notify::2day` per task.
+`[q]` snoozes the digest until the task's next reminder: 15, 10, 5 and 0 min before due, and after that every
+30 min until the task is done, skipped or dismissed. A snooze never lasts longer than 30 min, so a task with
+`notify::2h` comes back every 30 min before the follow-ups start.
+
+```lua
+require("pkb.notifier").setup({
+  default_notify = "30min",                       -- first reminder when a task has no notify:: tag
+  remind_before = { "15min", "10min", "5min", "0min" }, -- follow-ups ({} for none)
+  snooze_interval = 30 * 60,                      -- longest snooze, seconds
+})
+```
+
 ## Tests
 
 ```sh

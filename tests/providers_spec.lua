@@ -275,4 +275,30 @@ t.test("inbox: render_inbox returns the focus day's heading row", function()
   H.eq({ lines[6], lines[7] }, { "## 2026-11-11", "  (no tasks)" })
 end)
 
+t.test("inbox: a wrapped line continues under the task text, after the time slot", function()
+  local root = H.tmpdir()
+  H.write(root .. "/t.md", { "- [ ] Call the bank about the mortgage renewal papers today due::2026-11-10T08:00Z effort::30min" })
+  local n = notifier(root)
+  n.notify()
+  vim.cmd("vsplit")
+  local win = vim.api.nvim_get_current_win()
+  H.defer(function() if vim.api.nvim_win_is_valid(win) then vim.api.nvim_win_close(win, true) end end)
+  vim.api.nvim_win_set_width(win, 40)
+  n.open_day(2026, 11, 10)
+  local row = vim.fn.search("Call the bank", "n")
+  vim.cmd("redraw")
+  local first = vim.fn.screenpos(win, row, 1)
+  local function screen_line(r)
+    local s = ""
+    for c = first.col, first.col + 39 do s = s .. vim.fn.screenstring(r, c) end
+    return (s:gsub("%s+$", ""))
+  end
+  H.eq(screen_line(first.row), "[ ] 10:00–10:30  Call the bank about")
+  H.eq(screen_line(first.row + 1), "                 the mortgage renewal")
+  H.eq(screen_line(first.row + 2), "                 papers today  · t.md")
+  -- the options are local to the inbox: another buffer in the same window does not get them
+  vim.cmd("enew")
+  H.eq({ vim.wo[win].breakindent, vim.wo[win].linebreak }, { false, false })
+end)
+
 return t

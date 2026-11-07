@@ -10,9 +10,10 @@ local task_id = require("pkb.task_id")
 ---------------------------------------------------------------
 -- CONFIG
 ---------------------------------------------------------------
-M.DEFAULT_NOTIFY = "15min"
+M.DEFAULT_NOTIFY = "30min"     -- First reminder, when a task has no notify:: tag
+M.REMIND_BEFORE = { "15min", "10min", "5min", "0min" } -- Follow-up reminders before due
 M.POLL_INTERVAL = 30000        -- Poll every 30 seconds (ms)
-M.SNOOZE_INTERVAL = 30 * 60    -- Auto-snooze for 30 minutes (seconds) when closed with [q]
+M.SNOOZE_INTERVAL = 30 * 60    -- Longest snooze ([q] in the digest), in seconds
 M.DEFAULT_HORIZON = 90 * 86400
 
 function M.setup(opts)
@@ -33,6 +34,9 @@ function M.setup(opts)
   end
   if opts.snooze_interval then
     M.SNOOZE_INTERVAL = opts.snooze_interval
+  end
+  if opts.remind_before then
+    M.REMIND_BEFORE = opts.remind_before
   end
   if opts.default_horizon then
     M.DEFAULT_HORIZON = opts.default_horizon * 86400
@@ -59,6 +63,22 @@ M.popup_queue = {}
 M.popup_active = false
 M.timer = nil
 M.inbox_show_all = false
+
+---------------------------------------------------------------
+-- REMINDERS
+-- A task first pops up at notify:: before due. Snoozing it hides it until the next follow-up reminder
+-- (REMIND_BEFORE), but never for longer than SNOOZE_INTERVAL; after the last follow-up it comes back
+-- every SNOOZE_INTERVAL until it is done, skipped or dismissed.
+---------------------------------------------------------------
+--- When a task snoozed at `now` should pop up again.
+function M.snooze_until(entry, now)
+  local wake = now + M.SNOOZE_INTERVAL
+  for _, before in ipairs(M.REMIND_BEFORE) do
+    local ts = entry.due_ts - parser.parse_notify(before)
+    if ts > now and ts < wake then wake = ts end
+  end
+  return wake
+end
 
 ---------------------------------------------------------------
 -- TIMER TICK / EVALUATION LOGIC
@@ -117,7 +137,7 @@ local function check_notifications()
   end
 
   -- Show the digest, or update the existing one.
-  show_next_popup(M.popup_queue, M.SNOOZE_INTERVAL)
+  show_next_popup(M.popup_queue, M.snooze_until)
 end
 
 local function start_timer()
@@ -262,6 +282,12 @@ local function ensure_task_id(line, lines)
   return id, line .. " " .. task_id.tag(id)
 end
 
+--- Warns that a task's recur:: rule is invalid; returns false so update_note leaves the note unchanged.
+local function refuse_bad_rule(err)
+  vim.notify("[PKB Notify] " .. err .. ". Task not changed; fix its recur:: tag.", vim.log.levels.WARN)
+  return false
+end
+
 --- Completes a task by changing due:: -> old::, appending done::, and spawning the next instance if recurring.
 --- @param entry table Notification entry object
 function M.complete_task(entry)
@@ -281,6 +307,12 @@ function M.complete_task(entry)
 
     local now_iso = require('timestamps.actions').get_timestamp_now()
     local recur_str = parser.parse_recurrence(updated_original_line)
+    local next_ts
+    if recur_str and entry.due_ts then
+      local err
+      next_ts, err = parser.calculate_next_due_advanced(entry.due_ts, recur_str)
+      if not next_ts then return refuse_bad_rule(err) end
+    end
 
     -- 1. Transform current line: change due:: to old:: and append done::
     completed_line = updated_original_line:gsub("due::" .. vim.pesc(due_str), "old::" .. due_str)
@@ -293,8 +325,7 @@ function M.complete_task(entry)
     lines[idx] = completed_line
 
     -- 2. If task is recurring, calculate next due date and append new active task
-    if recur_str and entry.due_ts then
-      local next_ts = parser.calculate_next_due_advanced(entry.due_ts, recur_str)
+    if next_ts then
       local next_iso = require('timestamps.actions').get_timestamp(next_ts)
 
       -- Construct new task line with next due date and original recur tag
@@ -335,6 +366,9 @@ function M.skip_task(entry)
     local recur_str = parser.parse_recurrence(original_line)
 
     if recur_str and entry.due_ts then
+      local next_ts, err = parser.calculate_next_due_advanced(entry.due_ts, recur_str)
+      if not next_ts then return refuse_bad_rule(err) end
+
       -- 1. Archive current recurring instance as skipped
       local skipped_line = original_line:gsub("due::" .. vim.pesc(due_str), "old::" .. due_str)
       skipped_line = skipped_line:gsub("%s*recur::" .. vim.pesc(recur_str), "")
@@ -342,7 +376,6 @@ function M.skip_task(entry)
       lines[idx] = skipped_line
 
       -- 2. Spawn next recurrence instance
-      local next_ts = parser.calculate_next_due_advanced(entry.due_ts, recur_str)
       local next_iso = require('timestamps.actions').get_timestamp(next_ts)
       local next_line = original_line:gsub("due::" .. vim.pesc(due_str), "due::" .. next_iso)
       table.insert(lines, idx + 1, next_line)
@@ -497,6 +530,13 @@ function M.inbox(opts)
 
   local focus_row = render()
   vim.api.nvim_set_current_buf(buf)
+  -- Long lines (narrow phone screens) wrap at a word and continue under the task text, not under the status.
+  -- [0] makes these local to the inbox buffer in this window (like :setlocal), so the next buffer is unaffected.
+  local wo = vim.wo[0][0]
+  wo.wrap = true
+  wo.linebreak = true
+  wo.breakindent = true
+  wo.breakindentopt = "shift:" .. require("pkb.render").TEXT_COLUMN
   if focus_row then
     vim.api.nvim_win_set_cursor(0, { focus_row, 0 })
   end

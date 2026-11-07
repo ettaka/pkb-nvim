@@ -15,14 +15,22 @@ local function by_line(state)
   return r
 end
 
-t.test("finds due:: tasks, keyed by file:line, with notify_ts = due - default 15min", function()
+t.test("finds due:: tasks, keyed by file:line, with notify_ts = due - default 30min", function()
   local root = H.tmpdir()
   local f = H.write(root .. "/tasks.md", { "# tasks", "- [ ] a due::2026-11-10T08:00Z" })
   local e = scan(root)[f .. ":2"]
   H.ok(e, "entry not found")
   H.eq(e.due_ts, 1794297600)
-  H.eq(e.notify_ts, 1794297600 - 900)
+  H.eq(e.notify_ts, 1794297600 - 1800)
   H.eq({ e.file, e.line_num, e.triggered, e.dismissed }, { f, 2, false, false })
+end)
+
+t.test("a 23:xx due time in summer time is valid (no warning, right epoch)", function()
+  local root = H.tmpdir()
+  local f = H.write(root .. "/t.md", { "- [ ] late due::2026-09-30T23:20+03:00" })
+  local e = scan(root)[f .. ":1"]
+  H.eq(e.due_ts, 1790799600)
+  H.eq(vim.tbl_filter(function(m) return m:find("Invalid date", 1, true) end, H.messages), {})
 end)
 
 t.test("explicit notify:: overrides the default", function()

@@ -39,6 +39,18 @@ local plain = {
   { "bimonthly",   "2027-01-07 09:00" },
   { "yearly",      "2027-11-07 09:00" },
   { "annually",    "2027-11-07 09:00" },
+  -- unit names written out, singular or plural (recur::3month used to hang the editor)
+  { "day",         "2026-11-08 09:00" },
+  { "2days",       "2026-11-09 09:00" },
+  { "week",        "2026-11-14 09:00" },
+  { "2weeks",      "2026-11-21 09:00" },
+  { "month",       "2026-12-07 09:00" },
+  { "3month",      "2027-02-07 09:00" },
+  { "3months",     "2027-02-07 09:00" },
+  { "3monthly",    "2027-02-07 09:00" },
+  { "3m",          "2027-02-07 09:00" },
+  { "year",        "2027-11-07 09:00" },
+  { "2years",      "2028-11-07 09:00" },
 }
 for _, c in ipairs(plain) do
   t.test("next due " .. c[1], function()
@@ -136,15 +148,24 @@ t.test("advanced rule falls back to plain units", function()
   H.eq(H.fmt(P.calculate_next_due_advanced(base, "2w")), "2026-11-21 09:00")
 end)
 
-t.test("invalid weekday warns and advances one day", function()
-  H.eq(P.calculate_next_due_advanced(base, "1st_xyz"), base + 86400)
-  H.has(H.messages[1], "Invalid weekday")
-end)
-
-t.test("invalid ordinal warns and advances one day", function()
-  H.eq(P.calculate_next_due_advanced(base, "5th_mon"), base + 86400)
-  H.has(H.messages[1], "Invalid ordinal")
-end)
+-- An unknown rule has no next date (nil + reason). It used to return the same time, which hung the
+-- recurring-task expansion, or to advance one day, which silently made the task daily.
+local bad_rules = {
+  { "xyz",     "unknown unit" },
+  { "3mnth",   "unknown unit" },
+  { "0d",      "must be at least 1" },
+  { "1st_xyz", "weekday" },
+  { "5th_mon", "ordinal" },
+}
+for _, c in ipairs(bad_rules) do
+  t.test("invalid recurrence " .. c[1] .. " has no next date and says why", function()
+    local next_ts, err = P.calculate_next_due_advanced(base, c[1])
+    H.eq(next_ts, nil)
+    H.has(err, c[1])
+    H.has(err, c[2])
+    H.eq(H.messages, {}, "the caller decides how to report it")
+  end)
+end
 
 ---------------------------------------------------------------- expand_recurring_tasks
 t.test("expand_recurring_tasks adds virtual instances up to the horizon", function()
@@ -164,6 +185,17 @@ t.test("expand_recurring_tasks adds virtual instances up to the horizon", functi
     "a_" .. (due + 3 * 86400) .. "*@2026-11-10 09:00",
     "b@2026-11-07 09:00",
   })
+end)
+
+t.test("expand_recurring_tasks: an invalid recur:: does not hang, warns once with the file, keeps the task", function()
+  local entries = { a = { id = "t.md:1", file = "t.md", line_num = 1, line = "- [ ] a recur::3mnth", due_ts = base } }
+  for _ = 1, 3 do
+    local out = P.expand_recurring_tasks(entries, base + 365 * 86400)
+    H.eq(#out, 1)
+  end
+  local warned = vim.tbl_filter(function(m) return m:find("3mnth", 1, true) end, H.messages)
+  H.eq(#warned, 1, vim.inspect(H.messages))
+  H.has(warned[1], "t.md:1")
 end)
 
 ---------------------------------------------------------------- find_log_insertion_index

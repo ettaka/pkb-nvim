@@ -42,11 +42,21 @@ local function close_popup()
   clear_popup_state()
 end
 
+--- The key hint line. snooze_until(entry, now) gives the time [q] snoozes each task until.
+local function footer(snooze_until)
+  local now, next_at = os.time(), nil
+  for _, entry in ipairs(popup_batch) do
+    local wake = snooze_until(entry, now)
+    if not next_at or wake < next_at then next_at = wake end
+  end
+  return "[Enter] open inbox  |  [q] snooze all (next at " .. os.date("%H:%M", next_at) .. ")"
+end
+
 ----------------------------------------------------------------
 -- Render the current digest into the existing buffer.
 ----------------------------------------------------------------
 
-local function render_digest(snooz_interval)
+local function render_digest(snooze_until)
   if not popup_buf
       or not vim.api.nvim_buf_is_valid(popup_buf) then
     return
@@ -78,11 +88,7 @@ local function render_digest(snooz_interval)
     table.insert(lines, "")
   end
 
-  table.insert(
-    lines,
-    "[Enter] open inbox  |  [q] snooze all (" ..
-      math.floor(snooz_interval / 60) .. "m)"
-  )
+  table.insert(lines, footer(snooze_until))
 
   vim.bo[popup_buf].modifiable = true
 
@@ -117,7 +123,7 @@ end
 -- Create the digest popup.
 ----------------------------------------------------------------
 
-local function create_popup(snooz_interval)
+local function create_popup(snooze_until)
   if #popup_batch == 0 then
     return
   end
@@ -158,11 +164,7 @@ local function create_popup(snooz_interval)
     table.insert(lines, "")
   end
 
-  table.insert(
-    lines,
-    "[Enter] open inbox  |  [q] snooze all (" ..
-      math.floor(snooz_interval / 60) .. "m)"
-  )
+  table.insert(lines, footer(snooze_until))
 
   vim.bo[popup_buf].modifiable = true
 
@@ -224,10 +226,10 @@ local function create_popup(snooz_interval)
       return
     end
 
-    local snooze_until = os.time() + snooz_interval
+    local now = os.time()
 
     for _, entry in ipairs(popup_batch) do
-      entry.auto_snoozed_until = snooze_until
+      entry.auto_snoozed_until = snooze_until(entry, now)
     end
 
     close_popup()
@@ -272,7 +274,7 @@ end
 -- is already visible.
 ----------------------------------------------------------------
 
-function M.show_next_popup(popup_queue, snooz_interval)
+function M.show_next_popup(popup_queue, snooze_until)
   ----------------------------------------------------------------
   -- Move everything waiting in the queue into the current batch,
   -- ensuring uniqueness by task ID.
@@ -300,7 +302,7 @@ function M.show_next_popup(popup_queue, snooz_interval)
   ----------------------------------------------------------------
 
   if popup_is_valid() then
-    render_digest(snooz_interval)
+    render_digest(snooze_until)
     return
   end
 
@@ -314,11 +316,11 @@ function M.show_next_popup(popup_queue, snooz_interval)
     end
 
     if popup_is_valid() then
-      render_digest(snooz_interval)
+      render_digest(snooze_until)
       return
     end
 
-    create_popup(snooz_interval)
+    create_popup(snooze_until)
   end)
 end
 

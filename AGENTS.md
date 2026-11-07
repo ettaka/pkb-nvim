@@ -1,6 +1,6 @@
 # pkb-nvim — agent guide
 
-The core of the PKB stack. It scans `$PKB_ROOT` Markdown for tagged tasks and provides notifications (a digest popup, and Termux notifications on the phone), an inbox, task complete and skip with recurrence, and the agenda and effort providers for calendar-nvim.
+The core of the PKB stack. It scans `$PKB_ROOT` Markdown for tagged tasks and provides notifications (a digest popup, and Termux notifications on the phone), an inbox, task complete and skip with recurrence, and the day view and effort provider for calendar-nvim.
 
 This plugin is one part of the PKB stack (`timestamps-nvim` ← `pkb-nvim` ← `calendar-nvim`, wired together by
 `toolsrc/nvim-lua`). The cross-repo guide covers the note-tag format, the module map, the test harness, the git

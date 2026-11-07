@@ -124,6 +124,9 @@ end
 
 local SLOT_WIDTH = 11 -- "08:00–09:30"
 
+--- Display column (0-based) where a task's text starts: "[ ] " + slot + two spaces. Wrapped lines indent to it.
+M.TEXT_COLUMN = 4 + SLOT_WIDTH + 2
+
 local function pad(s, width)
   return s .. string.rep(" ", math.max(0, width - vim.fn.strdisplaywidth(s)))
 end

@@ -5,7 +5,7 @@ local M = {}
 
 local parse_iso = require('timestamps.parser').parse_iso
 
-M.DEFAULT_NOTIFY = "15min"
+M.DEFAULT_NOTIFY = "30min"
 
 function M.setup(opts)
   opts = opts or {}
@@ -204,6 +204,16 @@ function M.scan_files(notifications, files, new_state)
   carry_state(notifications or {}, new_state)
 end
 
+local warned_rules = {} -- "file:line rule" -> true: warn once per session, not on every inbox render
+
+local function warn_bad_rule(entry, err)
+  local key = (entry.id or "") .. " " .. err
+  if warned_rules[key] then return end
+  warned_rules[key] = true
+  vim.notify(("[PKB Notify] %s (%s:%s)"):format(err, entry.file or "?", tostring(entry.line_num or "?")),
+    vim.log.levels.WARN)
+end
+
 --- Expand recurring tasks up to a given horizon timestamp
 --- @param notifications table Map of notifications
 --- @param horizon_ts number Epoch timestamp horizon
@@ -218,7 +228,13 @@ function M.expand_recurring_tasks(notifications, horizon_ts)
     if recur_str and entry.due_ts then
       local current_ts = entry.due_ts
       while true do
-        current_ts = M.calculate_next_due_advanced(current_ts, recur_str)
+        local next_ts, err = M.calculate_next_due_advanced(current_ts, recur_str)
+        if not next_ts then
+          warn_bad_rule(entry, err)
+          break
+        end
+        if next_ts <= current_ts then break end -- never loop without moving forward
+        current_ts = next_ts
         if current_ts > horizon_ts then
           break
         end
@@ -302,25 +318,34 @@ local function get_nth_weekday_of_month(year, month, target_wday, nth, ref_date)
   end
 end
 
+-- Unit names a plain rule may use, as { unit, count multiplier }.
+local UNITS = {}
+for unit, names in pairs({
+  d = { "d", "day", "days", "daily" },
+  w = { "w", "week", "weeks", "weekly" },
+  m = { "m", "month", "months", "monthly" },
+  y = { "y", "year", "years", "yearly", "annually" },
+}) do
+  for _, name in ipairs(names) do UNITS[name] = { unit } end
+end
+UNITS.biweekly, UNITS.fortnightly, UNITS.bimonthly = { "w", 2 }, { "w", 2 }, { "m", 2 }
+
 --- Calculate the next due epoch timestamp based on recur rule
 --- @param current_ts number Epoch timestamp
 --- @param recur_str string e.g. "3d", "daily", "biweekly", "1w", "1m", "yearly"
---- @return number Next epoch timestamp
+--- @return number|nil next Next epoch timestamp, or nil for a rule it does not understand
+--- @return string|nil err Why the rule is invalid
 function M.calculate_next_due(current_ts, recur_str)
-  local num, unit = recur_str:match("^(%d*)(%a+)$")
-  num = tonumber(num) or 1
-
-  -- Preset aliases
-  if unit == "daily" then unit = "d"
-  elseif unit == "weekly" then unit = "w"
-  elseif unit == "biweekly" or unit == "fortnightly" then
-    num = 2
-    unit = "w"
-  elseif unit == "monthly" then unit = "m"
-  elseif unit == "bimonthly" then
-    num = 2
-    unit = "m"
-  elseif unit == "yearly" or unit == "annually" then unit = "y"
+  local num, name = recur_str:match("^(%d*)(%a+)$")
+  local unit = name and UNITS[name:lower()]
+  if not unit then
+    return nil, ("Unknown recurrence '%s': unknown unit (use e.g. 3d, 2w, 3m, 1y, daily, 3months)"):format(recur_str)
+  end
+  -- biweekly etc. carry their own count; a number in front multiplies it (3monthly = every 3 months)
+  num = (tonumber(num) or 1) * (unit[2] or 1)
+  unit = unit[1]
+  if num < 1 then
+    return nil, ("Unknown recurrence '%s': the count must be at least 1"):format(recur_str)
   end
 
   local date_tbl = os.date("*t", current_ts)
@@ -357,11 +382,7 @@ function M.calculate_next_due_advanced(current_ts, recur_str)
   local nth_str, day_str = recur_str:match("^(%w+)_(%a+)$")
   if nth_str and day_str then
     if not weekday_map[day_str:lower()] then
-      vim.notify(
-        string.format("[PKB Notify] Invalid weekday '%s' in recurrence rule '%s'", day_str, recur_str),
-        vim.log.levels.WARN
-      )
-      return current_ts + 86400 -- fallback advance by 1 day to prevent hanging
+      return nil, ("Unknown recurrence '%s': invalid weekday '%s'"):format(recur_str, day_str)
     end
     
     local target_wday = weekday_map[day_str:lower()]
@@ -373,11 +394,7 @@ function M.calculate_next_due_advanced(current_ts, recur_str)
     elseif nth_str == "4th" then nth = 4
     elseif nth_str == "last" then nth = -1
     else
-      vim.notify(
-        string.format("[PKB Notify] Invalid ordinal '%s' in recurrence rule '%s'", nth_str, recur_str),
-        vim.log.levels.WARN
-      )
-      return current_ts + 86400
+      return nil, ("Unknown recurrence '%s': invalid ordinal '%s' (use 1st, 2nd, 3rd, 4th or last)"):format(recur_str, nth_str)
     end
 
     if nth then

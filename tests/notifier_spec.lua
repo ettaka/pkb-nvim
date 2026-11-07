@@ -80,13 +80,13 @@ t.test("setup{default_notify} is used when a task has no notify:: tag", function
   H.eq(e.due_ts - e.notify_ts, 3600)
 end)
 
-t.test("default notify is 15min when setup does not set it", function()
+t.test("default notify is 30min when setup does not set it", function()
   local root = H.tmpdir()
   H.write(root .. "/t.md", { "- [ ] a due::2026-11-10T08:00Z" })
   local n = notifier(root)
   n.notify()
   local e = find(n, "- [ ] a")
-  H.eq(e.due_ts - e.notify_ts, 900)
+  H.eq(e.due_ts - e.notify_ts, 1800)
 end)
 
 t.test("explicit notify:: wins over setup{default_notify}", function()
@@ -107,6 +107,75 @@ t.test("calling setup again changes the default for the next scan", function()
   n.notify()
   local e = find(n, "- [ ] a")
   H.eq(e.due_ts - e.notify_ts, 1800)
+end)
+
+---------------------------------------------------------------- reminders and snooze
+-- The first reminder is at notify:: (default 30min) before due. Snoozing ([q]) hides a task until the next
+-- follow-up reminder (15, 10, 5 and 0 min before due), but never for longer than the snooze interval (30 min).
+local DUE = 1000000
+
+local function wakes(n, entry, from, count)
+  local out, now = {}, from
+  for _ = 1, count do
+    now = n.snooze_until(entry, now)
+    table.insert(out, (now - DUE) / 60)
+  end
+  return out
+end
+
+t.test("snoozing after the first reminder wakes at 15, 10, 5 and 0 min before due, then every 30 min", function()
+  local n = notifier(H.tmpdir())
+  H.eq(wakes(n, { due_ts = DUE }, DUE - 1800, 7), { -15, -10, -5, 0, 30, 60, 90 })
+end)
+
+t.test("snoozing between follow-ups wakes at the next one", function()
+  local n = notifier(H.tmpdir())
+  H.eq(wakes(n, { due_ts = DUE }, DUE - 12 * 60, 1), { -10 })
+end)
+
+t.test("an early first reminder snoozes 30 min at a time until the follow-ups", function()
+  local n = notifier(H.tmpdir())
+  H.eq(wakes(n, { due_ts = DUE }, DUE - 7200, 6), { -90, -60, -30, -15, -10, -5 })
+end)
+
+t.test("a short notify:: only gets the follow-ups after it", function()
+  local n = notifier(H.tmpdir())
+  H.eq(wakes(n, { due_ts = DUE }, DUE - 600, 3), { -5, 0, 30 })
+end)
+
+t.test("setup{remind_before} sets the follow-ups; {} turns them off", function()
+  local n = notifier(H.tmpdir(), { remind_before = { "20min", "1min" } })
+  H.eq(wakes(n, { due_ts = DUE }, DUE - 1800, 3), { -20, -1, 29 })
+  n.setup({ remind_before = {} })
+  H.eq(wakes(n, { due_ts = DUE }, DUE - 1800, 2), { 0, 30 })
+end)
+
+t.test("setup{snooze_interval} caps the snooze", function()
+  local n = notifier(H.tmpdir(), { snooze_interval = 300 })
+  H.eq(wakes(n, { due_ts = DUE }, DUE - 1800, 7), { -25, -20, -15, -10, -5, 0, 5 })
+end)
+
+t.test("[q] in the digest popup snoozes each task until its own next reminder", function()
+  local n = notifier(H.tmpdir())
+  local now = os.time()
+  local a = { id = "a", line = "- [ ] a", file = "t.md", due_ts = now + 14 * 60, notify_ts = now - 60 }
+  local b = { id = "b", line = "- [ ] b", file = "t.md", due_ts = now + 3600, notify_ts = now - 60 }
+  local ui = require("pkb.ui")
+  ui.show_next_popup({ a, b }, n.snooze_until)
+  local win
+  vim.wait(1000, function()
+    for _, w in ipairs(vim.api.nvim_list_wins()) do
+      if vim.api.nvim_win_get_config(w).relative ~= "" then win = w end
+    end
+    return win ~= nil
+  end)
+  assert(win, "no popup")
+  local buf = vim.api.nvim_win_get_buf(win)
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  H.has(lines[#lines], "[q] snooze all (next at " .. os.date("%H:%M", now + 4 * 60) .. ")")
+  vim.api.nvim_buf_call(buf, function() vim.fn.maparg("q", "n", false, true).callback() end)
+  H.eq({ a.auto_snoozed_until - now, b.auto_snoozed_until - now }, { 4 * 60, 1800 })
+  H.ok(not vim.api.nvim_win_is_valid(win))
 end)
 
 ---------------------------------------------------------------- state follows the task (known issue 3)
@@ -491,5 +560,18 @@ t.test(":PKBComplete on a line without due:: only warns", function()
   H.eq(read(f), { "just text" })
   H.has(H.messages[#H.messages], "No due:: tag")
 end)
+
+---------------------------------------------------------------- invalid recur:: rule
+for _, action in ipairs({ "complete_task", "skip_task" }) do
+  t.test(action .. " leaves a task with an invalid recur:: unchanged and warns", function()
+    local root = H.tmpdir()
+    local f = H.write(root .. "/t.md", { "- [ ] report due::2026-11-10T08:00Z recur::3mnth" })
+    local n = notifier(root)
+    n.notify()
+    n[action](find(n, "report"))
+    H.eq(read(f), { "- [ ] report due::2026-11-10T08:00Z recur::3mnth" })
+    H.has(H.messages[#H.messages], "3mnth")
+  end)
+end
 
 return t
