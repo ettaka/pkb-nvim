@@ -12,8 +12,8 @@ function M. get_pkb_day_agenda(year, month, day)
   local target_date = string.format("%04d-%02d-%02d", year, month, day)
   local day_entries = {}
 
-  -- Expand recurring tasks up to 90 days ahead
-  local horizon_ts = os.time() + (90 * 86400)
+  -- Expand recurring tasks as far ahead as the inbox does (setup{default_horizon}, default 90 days)
+  local horizon_ts = os.time() + notifier.DEFAULT_HORIZON
   local all_entries = parser.expand_recurring_tasks(notifier.notifications or {}, horizon_ts)
 
   for _, entry in ipairs(all_entries) do
@@ -38,7 +38,7 @@ function M. get_pkb_day_agenda(year, month, day)
 
     -- Strip markdown checkboxes and PKB tags for clean display
     local clean_line = entry.line
-      :gsub("^%s*%- %[[ %]]%s*", "")
+      :gsub("^%s*%- %[[ xX]%]%s*", "") -- "- [ ] " checkbox
       :gsub("^%s*%- %s*", "")
       :gsub("%s*due::%S+", "")
       :gsub("%s*notify::%S+", "")

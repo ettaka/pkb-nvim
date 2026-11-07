@@ -3,6 +3,10 @@
 -- ============================================================
 
 local M = {}
+
+local parser = require("pkb.parser")
+local task_id = require("pkb.task_id")
+
 ---------------------------------------------------------------
 -- CONFIG
 ---------------------------------------------------------------
@@ -21,6 +25,8 @@ function M.setup(opts)
   end
   if opts.default_notify then
     M.DEFAULT_NOTIFY = opts.default_notify
+    -- The parser applies the default while scanning, so it needs the value too.
+    parser.setup({ default_notify = opts.default_notify })
   end
   if opts.poll_interval then
     M.POLL_INTERVAL = opts.poll_interval
@@ -33,12 +39,10 @@ function M.setup(opts)
   end
 end
 
-local parser = require("pkb.parser")
-parser.setup({ DEFAULT_NOTIFY = M.DEFAULT_NOTIFY })
 local scan_dir = require("pkb.parser").scan_dir
 
 local termux_notification = require("pkb.termux_notification")
-phone_notify_digest = termux_notification.phone_notify_digest
+local phone_notify_digest = termux_notification.phone_notify_digest
 
 local show_next_popup = require("pkb.ui").show_next_popup
 local phone_notify = require("pkb.termux_notification").phone_notify
@@ -125,64 +129,137 @@ local function start_timer()
   end
 end
 
+---------------------------------------------------------------
+-- NOTE EDITING
+---------------------------------------------------------------
+--- Change a note on disk or, if it is open, in its buffer.
+--- `edit(lines)` changes `lines` in place and returns false to cancel.
+--- An open buffer is changed in place so unsaved edits survive. It is written only if it had no
+--- unsaved changes before; otherwise it stays modified and the user is told to save it.
+--- @return boolean applied
+local function update_note(path, edit)
+  local bufnr = vim.fn.bufnr(path)
+  local in_buffer = bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr)
+
+  local old
+  if in_buffer then
+    old = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+    if #old == 1 and old[1] == "" and vim.fn.filereadable(path) == 0 then old = {} end -- new, empty buffer
+  elseif vim.fn.filereadable(path) == 1 then
+    old = vim.fn.readfile(path)
+  else
+    old = {}
+  end
+
+  local lines = vim.list_extend({}, old)
+  if edit(lines) == false then return false end
+
+  if not in_buffer then
+    vim.fn.writefile(lines, path)
+    return true
+  end
+
+  -- Replace only the changed range, so cursor, marks and undo stay as local as possible.
+  local first = 1
+  while first <= #old and first <= #lines and old[first] == lines[first] do first = first + 1 end
+  local old_last, new_last = #old, #lines
+  while old_last >= first and new_last >= first and old[old_last] == lines[new_last] do
+    old_last, new_last = old_last - 1, new_last - 1
+  end
+  local was_modified = vim.bo[bufnr].modified
+  vim.api.nvim_buf_set_lines(bufnr, first - 1, old_last, false, vim.list_slice(lines, first, new_last))
+
+  if was_modified then
+    vim.notify(
+      ("[PKB] Updated %s in its buffer. It has unsaved changes, so save it (:w) to keep this change.")
+        :format(vim.fn.fnamemodify(path, ":t")),
+      vim.log.levels.WARN
+    )
+  else
+    vim.api.nvim_buf_call(bufnr, function() vim.cmd("silent noautocmd write") end)
+  end
+  return true
+end
+
+--- Index of the entry's task line in `lines`: its scanned line number if the text still matches,
+--- otherwise the only line with exactly the same text. nil if it is gone or ambiguous.
+local function locate_task(lines, entry)
+  if not entry.line then return lines[entry.line_num] and entry.line_num or nil end
+  if lines[entry.line_num] == entry.line then return entry.line_num end
+  local found
+  for i, l in ipairs(lines) do
+    if l == entry.line then
+      if found then return nil end
+      found = i
+    end
+  end
+  return found
+end
+
+local function warn_not_found(entry)
+  vim.notify(
+    ("[PKB] Task not found in %s (changed since the last scan?): %s")
+      :format(vim.fn.fnamemodify(entry.file, ":t"), entry.line or ("line " .. entry.line_num)),
+    vim.log.levels.WARN
+  )
+end
+
 local function log_to_daily_note(entry, completed_line)
   if not M.PKB_ROOT then return end
 
   local date_str = os.date("%Y-%m-%d", entry.due_ts)
   local note_path = M.PKB_ROOT .. "/" .. date_str .. ".md"
 
-  local lines = {}
-  if vim.fn.filereadable(note_path) == 1 then
-    lines = vim.fn.readfile(note_path)
-  else
-    table.insert(lines, "# " .. date_str)
-    table.insert(lines, "")
-    table.insert(lines, "# morning")
-    table.insert(lines, "")
-    table.insert(lines, "# afternoon")
-    table.insert(lines, "")
-    table.insert(lines, "# evening")
-    table.insert(lines, "")
-  end
+  update_note(note_path, function(lines)
+    if #lines == 0 then
+      table.insert(lines, "# " .. date_str)
+      table.insert(lines, "")
+      table.insert(lines, "# morning")
+      table.insert(lines, "")
+      table.insert(lines, "# afternoon")
+      table.insert(lines, "")
+      table.insert(lines, "# evening")
+      table.insert(lines, "")
+    end
 
-  local current_hour = tonumber(os.date("%H"))
-  local target_section = "morning"
-  if current_hour >= 12 and current_hour < 18 then
-    target_section = "afternoon"
-  elseif current_hour >= 18 then
-    target_section = "evening"
-  end
+    local current_hour = tonumber(os.date("%H"))
+    local target_section = "morning"
+    if current_hour >= 12 and current_hour < 18 then
+      target_section = "afternoon"
+    elseif current_hour >= 18 then
+      target_section = "evening"
+    end
 
-  local section_idx, insert_idx = parser.find_log_insertion_index(lines, target_section)
+    local section_idx, insert_idx = parser.find_log_insertion_index(lines, target_section)
 
-  if section_idx and insert_idx then
-    table.insert(lines, insert_idx, "- " .. completed_line)
-  else
-    table.insert(lines, "")
-    table.insert(lines, target_section)
-    table.insert(lines, "- " .. completed_line)
-  end
-
-  vim.fn.writefile(lines, note_path)
+    if section_idx and insert_idx then
+      table.insert(lines, insert_idx, "- " .. completed_line)
+    else
+      table.insert(lines, "")
+      table.insert(lines, target_section)
+      table.insert(lines, "- " .. completed_line)
+    end
+  end)
+  return note_path
 end
 
--- insert a new task ID at cursor
-local function get_task_id()
-  local ts = vim.fn.strftime("%Y-%m-%dT%H:%M")
-  return "task::t-" .. ts
+--- A new task id that no known task uses and that does not appear in `lines` (e.g. the note being
+--- edited, which may also hold completed tasks and references).
+--- @param lines string[]|nil
+function M.new_task_id(lines)
+  local taken = task_id.collect(lines or {})
+  for _, e in pairs(M.notifications) do task_id.collect({ e.line }, taken) end
+  return task_id.new_unique(taken)
 end
 
---- Generates a short unique task ID tag if not already present
-local function ensure_task_id(line)
-  local TASK_ID_REGEX = "t%-%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d"
-  local task_id = line:match("task::(".. TASK_ID_REGEX ..")")
-  if task_id then
-    return task_id, line
+--- The task's id and its line, appending a new task::<id> tag if it has none.
+local function ensure_task_id(line, lines)
+  local id = task_id.from_line(line)
+  if id then
+    return id, line
   end
-
-  -- Generate a short random/timestamp-based ID (e.g., task::t1710000000_a1b2)
-  local updated_line = line .. " " .. get_task_id()
-  return task_id, updated_line
+  id = M.new_task_id(lines)
+  return id, line .. " " .. task_id.tag(id)
 end
 
 --- Completes a task by changing due:: -> old::, appending done::, and spawning the next instance if recurring.
@@ -190,61 +267,54 @@ end
 function M.complete_task(entry)
   if not entry or not entry.file or not entry.line_num then return end
 
-  local ok, lines = pcall(vim.fn.readfile, entry.file)
-  if not ok or not lines[entry.line_num] then return end
+  local completed_line
+  local applied = update_note(entry.file, function(lines)
+    local idx = locate_task(lines, entry)
+    if not idx then warn_not_found(entry); return false end
 
-  local original_line = lines[entry.line_num]
-  local due_str = original_line:match("due::([^%s]+)")
-  if not due_str then return end
+    local original_line = lines[idx]
+    local due_str = original_line:match("due::([^%s]+)")
+    if not due_str then return false end
 
-  -- Ensure the task has a task::<id>
-  local task_id, updated_original_line = ensure_task_id(original_line)
+    -- Ensure the task has a task::<id>
+    local _, updated_original_line = ensure_task_id(original_line, lines)
 
-  local now_iso = require('timestamps.actions').get_timestamp_now()
-  local recur_str = parser.parse_recurrence(updated_original_line)
+    local now_iso = require('timestamps.actions').get_timestamp_now()
+    local recur_str = parser.parse_recurrence(updated_original_line)
 
-  -- 1. Transform current line: change due:: to old:: and append done::
-  local completed_line = updated_original_line:gsub("due::" .. vim.pesc(due_str), "old::" .. due_str)
-  if recur_str then
-    -- Strip recur:: from completed log entry so history stays clean
-    completed_line = completed_line:gsub("%s*recur::" .. vim.pesc(recur_str), "")
-  end
-  completed_line = completed_line .. " done::" .. now_iso
+    -- 1. Transform current line: change due:: to old:: and append done::
+    completed_line = updated_original_line:gsub("due::" .. vim.pesc(due_str), "old::" .. due_str)
+    if recur_str then
+      -- Strip recur:: from completed log entry so history stays clean
+      completed_line = completed_line:gsub("%s*recur::" .. vim.pesc(recur_str), "")
+    end
+    completed_line = completed_line .. " done::" .. now_iso
 
-  lines[entry.line_num] = completed_line
+    lines[idx] = completed_line
 
-  -- 2. If task is recurring, calculate next due date and append new active task
-  if recur_str and entry.due_ts then
-    local next_ts = parser.calculate_next_due_advanced(entry.due_ts, recur_str)
-    local next_iso = require('timestamps.actions').get_timestamp(next_ts)
+    -- 2. If task is recurring, calculate next due date and append new active task
+    if recur_str and entry.due_ts then
+      local next_ts = parser.calculate_next_due_advanced(entry.due_ts, recur_str)
+      local next_iso = require('timestamps.actions').get_timestamp(next_ts)
 
-    -- Construct new task line with next due date and original recur tag
-    local next_line = updated_original_line:gsub("due::" .. vim.pesc(due_str), "due::" .. next_iso)
+      -- Construct new task line with next due date and original recur tag
+      local next_line = updated_original_line:gsub("due::" .. vim.pesc(due_str), "due::" .. next_iso)
     
-    -- Insert new line immediately after completed task
-    table.insert(lines, entry.line_num + 1, next_line)
-  end
-
-  -- Write changes back to file
-  vim.fn.writefile(lines, entry.file)
+      -- Insert new line immediately after completed task
+      table.insert(lines, idx + 1, next_line)
+    end
+  end)
+  if not applied then return end
 
   -- 3. Log to daily note with source file & task::<id> tag (retaining only t-ref for references)
   local relative_file = vim.fn.fnamemodify(entry.file, ":t")
-  local logged_line = completed_line:gsub("task::(t%-[%w%-%:]+)", "%1")
+  local logged_line = task_id.untag(completed_line)
   local log_line = string.format("%s (from %s)", logged_line, relative_file)
-  log_to_daily_note(entry, log_line)
+  local daily_note = log_to_daily_note(entry, log_line)
 
-  -- Reload current buffer if open in Neovim
-  local bufnr = vim.fn.bufnr(entry.file)
-  if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
-    vim.api.nvim_buf_call(bufnr, function()
-      vim.cmd("edit!")
-    end)
-  end
-
-  -- Mark as dismissed in memory and rescan
+  -- Mark as dismissed in memory and rescan only the notes that changed
   entry.dismissed = true
-  M.notify()
+  M.rescan_files({ entry.file, daily_note })
 end
 
 --- Skips a task. For recurring tasks, archives the current instance as `skipped::` and creates
@@ -253,59 +323,68 @@ end
 function M.skip_task(entry)
   if not entry or not entry.file or not entry.line_num then return end
 
-  local ok, lines = pcall(vim.fn.readfile, entry.file)
-  if not ok or not lines[entry.line_num] then return end
+  local applied = update_note(entry.file, function(lines)
+    local idx = locate_task(lines, entry)
+    if not idx then warn_not_found(entry); return false end
 
-  local original_line = lines[entry.line_num]
-  local due_str = original_line:match("due::([^%s]+)")
-  if not due_str then return end
+    local original_line = lines[idx]
+    local due_str = original_line:match("due::([^%s]+)")
+    if not due_str then return false end
 
-  local now_iso = require('timestamps.actions').get_timestamp_now()
-  local recur_str = parser.parse_recurrence(original_line)
+    local now_iso = require('timestamps.actions').get_timestamp_now()
+    local recur_str = parser.parse_recurrence(original_line)
 
-  if recur_str and entry.due_ts then
-    -- 1. Archive current recurring instance as skipped
-    local skipped_line = original_line:gsub("due::" .. vim.pesc(due_str), "old::" .. due_str)
-    skipped_line = skipped_line:gsub("%s*recur::" .. vim.pesc(recur_str), "")
-    skipped_line = skipped_line .. " skipped::" .. now_iso
-    lines[entry.line_num] = skipped_line
+    if recur_str and entry.due_ts then
+      -- 1. Archive current recurring instance as skipped
+      local skipped_line = original_line:gsub("due::" .. vim.pesc(due_str), "old::" .. due_str)
+      skipped_line = skipped_line:gsub("%s*recur::" .. vim.pesc(recur_str), "")
+      skipped_line = skipped_line .. " skipped::" .. now_iso
+      lines[idx] = skipped_line
 
-    -- 2. Spawn next recurrence instance
-    local next_ts = parser.calculate_next_due_advanced(entry.due_ts, recur_str)
-    local next_iso = require('timestamps.actions').get_timestamp(next_ts)
-    local next_line = original_line:gsub("due::" .. vim.pesc(due_str), "due::" .. next_iso)
-    table.insert(lines, entry.line_num + 1, next_line)
-  else
-    -- For non-recurring tasks, advance due date by 1 day (24 hours)
-    local next_ts = (entry.due_ts or os.time()) + 86400
-    local next_iso = require('timestamps.actions').get_timestamp(next_ts)
-    lines[entry.line_num] = original_line:gsub("due::" .. vim.pesc(due_str), "due::" .. next_iso)
-  end
+      -- 2. Spawn next recurrence instance
+      local next_ts = parser.calculate_next_due_advanced(entry.due_ts, recur_str)
+      local next_iso = require('timestamps.actions').get_timestamp(next_ts)
+      local next_line = original_line:gsub("due::" .. vim.pesc(due_str), "due::" .. next_iso)
+      table.insert(lines, idx + 1, next_line)
+    else
+      -- For non-recurring tasks, advance due date by 1 day (24 hours)
+      local next_ts = (entry.due_ts or os.time()) + 86400
+      local next_iso = require('timestamps.actions').get_timestamp(next_ts)
+      lines[idx] = original_line:gsub("due::" .. vim.pesc(due_str), "due::" .. next_iso)
+    end
+  end)
+  if not applied then return end
 
-  -- Write changes back to file
-  vim.fn.writefile(lines, entry.file)
-
-  -- Reload current buffer if loaded in Neovim
-  local bufnr = vim.fn.bufnr(entry.file)
-  if bufnr ~= -1 and vim.api.nvim_buf_is_loaded(bufnr) then
-    vim.api.nvim_buf_call(bufnr, function()
-      vim.cmd("edit!")
-    end)
-  end
-
-  -- Rescan notifications
-  M.notify()
+  -- Rescan the changed note
+  M.rescan_files({ entry.file })
 end
 
 ---------------------------------------------------------------
 -- COMMANDS & PUBLIC API
 ---------------------------------------------------------------
-function M.notify()
-  local new_state = {}
-  scan_dir(M.notifications, M.PKB_ROOT, new_state)
+--- True if PKB_ROOT is a usable folder. Otherwise warns (once per root value) and returns false.
+local warned_root = false
+local function root_ok()
+  local root = M.PKB_ROOT
+  if root and vim.fn.isdirectory(root) == 1 then
+    warned_root = false
+    return true
+  end
+  local key = tostring(root)
+  if warned_root ~= key then
+    warned_root = key
+    vim.notify(
+      root
+        and ("[PKB] PKB root folder not found: %s (notifications are off)"):format(root)
+        or "[PKB] No PKB root folder configured: set pkb_root in setup() (e.g. from $PKB_ROOT); notifications are off",
+      vim.log.levels.WARN
+    )
+  end
+  return false
+end
 
-  M.notifications = new_state
-
+--- Finish a (full or partial) rescan: drop stale popups, start the poll timer, report.
+local function after_rescan()
   -- Clean up popup_queue to keep only active, non-dismissed, non-done unique entries
   local valid_queue = {}
   local seen_queue_ids = {}
@@ -325,6 +404,72 @@ function M.notify()
   start_timer()
 
   print("PKB notifications rescanned: " .. count)
+end
+
+--- Full rescan of PKB_ROOT (startup, :PKBNotify, :PKBInbox).
+function M.notify()
+  if not root_ok() then return end
+
+  local new_state = {}
+  scan_dir(M.notifications, M.PKB_ROOT, new_state)
+  M.notifications = new_state
+  after_rescan()
+end
+
+--- The key a full scan uses for `path` (PKB_ROOT .. "/" .. relative path) if it is a markdown file
+--- inside PKB_ROOT, else nil. Handles relative paths, "." / "..", and symlinks (e.g. ~/pkb -> elsewhere).
+local function pkb_key(path)
+  local function canonical(p)
+    return vim.fs.normalize(vim.fn.resolve(vim.fs.normalize(vim.fn.fnamemodify(p, ":p"))))
+  end
+  if not path:match("%.md$") then return nil end
+  local root = canonical(M.PKB_ROOT):gsub("/+$", "")
+  local full = canonical(path)
+  if full:sub(1, #root + 1) ~= root .. "/" then return nil end
+  return M.PKB_ROOT .. "/" .. full:sub(#root + 2)
+end
+
+--- Rescan only these notes (e.g. the one just saved); every other note keeps its entries.
+--- State follows tasks as in a full scan. Paths outside PKB_ROOT or not *.md are ignored.
+--- @param paths string[]
+function M.rescan_files(paths)
+  if not root_ok() then return end
+
+  local keys, wanted = {}, {}
+  for _, p in ipairs(paths) do
+    local key = pkb_key(p)
+    if key and not wanted[key] then
+      wanted[key] = true
+      table.insert(keys, key)
+    end
+  end
+  if #keys == 0 then return end
+
+  local previous, kept = {}, {}
+  for id, e in pairs(M.notifications) do
+    if wanted[e.file] then previous[id] = e else kept[id] = e end
+  end
+  local fresh = {}
+  parser.scan_files(previous, keys, fresh)
+  for id, e in pairs(fresh) do kept[id] = e end
+
+  M.notifications = kept
+  after_rescan()
+end
+
+local pending_paths, pending_timer = {}, nil
+
+--- Rescan `path` after `delay_ms` (default 500); notes queued in the meantime are rescanned together.
+--- Meant for BufWritePost, so a burst of saves costs one partial rescan.
+function M.queue_rescan(path, delay_ms)
+  pending_paths[path] = true
+  pending_timer = pending_timer or vim.uv.new_timer()
+  pending_timer:stop()
+  pending_timer:start(delay_ms or 500, 0, vim.schedule_wrap(function()
+    local paths = vim.tbl_keys(pending_paths)
+    pending_paths = {}
+    M.rescan_files(paths)
+  end))
 end
 
 function M.inbox()
@@ -398,10 +543,6 @@ function M.inbox()
   end, { buffer = buf })
 end
 
----------------------------------------------------------------
--- SETUP
----------------------------------------------------------------
-vim.api.nvim_create_user_command("PKBNotify", M.notify, {})
-vim.api.nvim_create_user_command("PKBInbox",  M.inbox,  {})
+-- User commands are defined in plugin/pkb.lua, not here, so requiring this module has no side effects.
 
 return M

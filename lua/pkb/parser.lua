@@ -62,10 +62,7 @@ local function parse_line(notifications, line, line_num, file, new_state, is_in_
   if not line_num then return end
   local id = string.format("%s:%d", file, line_num)
 
-  -- Preserve existing state across rescans
-  local existing = notifications[id]
-
-  -- 6. Construct and save the entry state safely
+  -- 6. Construct the entry; state from the previous scan is matched afterwards (carry_state)
   new_state[id] = {
     id = id,
     line = line,
@@ -73,10 +70,90 @@ local function parse_line(notifications, line, line_num, file, new_state, is_in_
     line_num = line_num,
     due_ts = due_ts,
     notify_ts = notify_ts,
-    triggered = existing and existing.triggered or false,
-    dismissed = existing and existing.dismissed or false,
-    auto_snoozed_until = existing and existing.auto_snoozed_until or nil,
+    triggered = false,
+    dismissed = false,
+    auto_snoozed_until = nil,
   }
+end
+
+---------------------------------------------------------------
+-- STATE ACROSS RESCANS
+---------------------------------------------------------------
+local TASK_ID_PATTERN = require("pkb.task_id").TAG_PATTERN
+
+-- State of tasks with a task:: id that disappeared in a rescan, keyed "id@due_ts", so a task that is
+-- cut from one note and pasted into another (two saves, a rescan in between) keeps its state.
+local vanished, vanished_count = {}, 0
+local VANISHED_MAX = 1000
+
+local function by_position(a, b)
+  if a.file ~= b.file then return a.file < b.file end
+  return a.line_num < b.line_num
+end
+
+local function sorted_values(t)
+  local list = {}
+  for _, v in pairs(t) do table.insert(list, v) end
+  table.sort(list, by_position)
+  return list
+end
+
+--- Copy triggered/dismissed/snooze state from the previous scan to the matching task in this one.
+--- A task is matched (1) by exact line text in the same file, identical lines paired in order, else
+--- (2) by task:: id with the same due time (survives edits to the text and moves between files,
+---     also when the task was missing from the scans in between).
+--- Anything else, including a changed due date, starts fresh. Line numbers are not used: they
+--- shift whenever lines are added or removed above a task.
+local function carry_state(old, new)
+  local old_list, new_list = sorted_values(old), sorted_values(new)
+  local used, matched = {}, {}
+
+  local by_text = {}
+  for _, e in ipairs(old_list) do
+    local key = e.file .. "\0" .. e.line
+    by_text[key] = by_text[key] or {}
+    table.insert(by_text[key], e)
+  end
+  for _, n in ipairs(new_list) do
+    for _, e in ipairs(by_text[n.file .. "\0" .. n.line] or {}) do
+      if not used[e] then used[e], matched[n] = true, e; break end
+    end
+  end
+
+  local by_task = {}
+  for _, e in ipairs(old_list) do
+    local tid = not used[e] and e.line:match(TASK_ID_PATTERN)
+    if tid then
+      by_task[tid] = by_task[tid] or {}
+      table.insert(by_task[tid], e)
+    end
+  end
+  for _, n in ipairs(new_list) do
+    local tid = not matched[n] and n.line:match(TASK_ID_PATTERN)
+    for _, e in ipairs(tid and by_task[tid] or {}) do
+      if not used[e] and e.due_ts == n.due_ts then used[e], matched[n] = true, e; break end
+    end
+    local key = tid and not matched[n] and (tid .. "@" .. n.due_ts)
+    if key and vanished[key] then
+      matched[n], vanished[key] = vanished[key], nil
+      vanished_count = vanished_count - 1
+    end
+  end
+
+  -- Remember tasks with an id that are gone from this scan
+  for _, e in ipairs(old_list) do
+    local tid = not used[e] and e.line:match(TASK_ID_PATTERN)
+    if tid and e.due_ts then
+      if vanished_count >= VANISHED_MAX then vanished, vanished_count = {}, 0 end
+      local key = tid .. "@" .. e.due_ts
+      if not vanished[key] then vanished_count = vanished_count + 1 end
+      vanished[key] = { triggered = e.triggered, dismissed = e.dismissed, auto_snoozed_until = e.auto_snoozed_until }
+    end
+  end
+
+  for n, e in pairs(matched) do
+    n.triggered, n.dismissed, n.auto_snoozed_until = e.triggered, e.dismissed, e.auto_snoozed_until
+  end
 end
 
 local function scan_file(notifications, file, new_state)
@@ -93,7 +170,7 @@ local function scan_file(notifications, file, new_state)
   end
 end
 
-function M.scan_dir(notifications, path, new_state)
+local function walk(notifications, path, new_state)
   local handle = vim.loop.fs_scandir(path)
   if not handle then return end
 
@@ -105,9 +182,26 @@ function M.scan_dir(notifications, path, new_state)
     if typ == "file" and name:match("%.md$") then
       scan_file(notifications, full, new_state)
     elseif typ == "directory" then
-      M.scan_dir(notifications, full, new_state)
+      walk(notifications, full, new_state)
     end
   end
+end
+
+--- Scan `path` recursively into `new_state` (keyed "file:line"), carrying state over from
+--- `notifications` (the previous scan) to the same tasks.
+function M.scan_dir(notifications, path, new_state)
+  if type(path) ~= "string" then return end
+  walk(notifications, path, new_state)
+  carry_state(notifications or {}, new_state)
+end
+
+--- Scan only `files` (markdown paths, as full-scan keys) into `new_state`, carrying state over from
+--- `notifications`, which should hold the previous entries of those files. Missing files add nothing.
+function M.scan_files(notifications, files, new_state)
+  for _, file in ipairs(files) do
+    if file:match("%.md$") then scan_file(notifications, file, new_state) end
+  end
+  carry_state(notifications or {}, new_state)
 end
 
 --- Expand recurring tasks up to a given horizon timestamp
@@ -235,12 +329,24 @@ function M.calculate_next_due(current_ts, recur_str)
     date_tbl.day = date_tbl.day + num
   elseif unit == "w" then
     date_tbl.day = date_tbl.day + (num * 7)
-  elseif unit == "m" then
-    date_tbl.month = date_tbl.month + num
-  elseif unit == "y" then
-    date_tbl.year = date_tbl.year + num
+  elseif unit == "m" or unit == "y" then
+    -- Move to the 1st of the target month first, then clamp the day to that month's length,
+    -- so e.g. Jan 31 + 1 month is Feb 28/29 rather than overflowing into March.
+    local day = date_tbl.day
+    date_tbl.day = 1
+    if unit == "m" then
+      date_tbl.month = date_tbl.month + num
+    else
+      date_tbl.year = date_tbl.year + num
+    end
+    local last_day = os.date("*t", os.time({ year = date_tbl.year, month = date_tbl.month + 1, day = 0, hour = 12 })).day
+    date_tbl.day = math.min(day, last_day)
   end
 
+  -- os.date("*t") records whether current_ts was in summer time. Keeping that flag would make
+  -- os.time() shift the result by an hour when the new date is in the other half of the year;
+  -- clearing it lets the system decide, so the task keeps its wall-clock time.
+  date_tbl.isdst = nil
   return os.time(date_tbl)
 end
 

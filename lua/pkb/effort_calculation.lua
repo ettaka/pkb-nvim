@@ -42,8 +42,8 @@ function M.get_tasks_duration(year, month, day)
   local target_date = string.format("%04d-%02d-%02d", year, month, day)
   local total_hours = 0
 
-  -- Define a horizon of 90 days ahead for forecasting recurring effort
-  local horizon_ts = os.time() + (90 * 86400)
+  -- Forecast recurring effort as far ahead as the inbox does (setup{default_horizon}, default 90 days)
+  local horizon_ts = os.time() + notifier.DEFAULT_HORIZON
   local all_entries = parser.expand_recurring_tasks(notifier.notifications or {}, horizon_ts)
 
   for _, entry in ipairs(all_entries) do
