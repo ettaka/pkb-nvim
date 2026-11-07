@@ -472,17 +472,17 @@ function M.queue_rescan(path, delay_ms)
   end))
 end
 
-function M.inbox()
-  M.notify()
-  local function get_notification_list()
-    local list = {}
-    for _, n in pairs(M.notifications) do
-      table.insert(list, n)
-    end
-    return list
+--- Open the inbox in the current window: tasks by day, each with its time slot.
+--- opts.date ("YYYY-MM-DD"): put the cursor on that day; it is shown even if it has no tasks.
+function M.inbox(opts)
+  opts = opts or {}
+  if opts.date and not opts.date:match("^%d%d%d%d%-%d%d%-%d%d$") then
+    vim.notify("[PKB] Inbox date must be YYYY-MM-DD, got " .. opts.date, vim.log.levels.WARN)
+    return
   end
+  M.notify()
 
-  if #get_notification_list() == 0 then
+  if vim.tbl_isempty(M.notifications) and not opts.date then
     vim.notify("No PKB notifications", vim.log.levels.INFO)
     return
   end
@@ -490,15 +490,23 @@ function M.inbox()
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
 
-  render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
+  local render_opts = { root = M.PKB_ROOT, focus_date = opts.date }
+  local function render()
+    return render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf, render_opts)
+  end
+
+  local focus_row = render()
   vim.api.nvim_set_current_buf(buf)
+  if focus_row then
+    vim.api.nvim_win_set_cursor(0, { focus_row, 0 })
+  end
 
   -- d → dismiss
   vim.keymap.set("n", "d", function()
     local n = get_notification_at_cursor(buf)
     if n then
       n.dismissed = true
-      render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
+      render()
     end
   end, { buffer = buf })
 
@@ -516,7 +524,7 @@ function M.inbox()
   -- t → toggle view
   vim.keymap.set("n", "t", function()
     M.inbox_show_all = not M.inbox_show_all
-    render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
+    render()
   end, { buffer = buf })
 
   -- q → close
@@ -529,7 +537,7 @@ function M.inbox()
     local n = get_notification_at_cursor(buf)
     if n then
       M.complete_task(n)
-      render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
+      render()
     end
   end, { buffer = buf })
 
@@ -538,9 +546,14 @@ function M.inbox()
     local n = get_notification_at_cursor(buf)
     if n then
       M.skip_task(n)
-      render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf)
+      render()
     end
   end, { buffer = buf })
+end
+
+--- Open the inbox on a day (calendar-nvim's open_day callback).
+function M.open_day(year, month, day)
+  M.inbox({ date = string.format("%04d-%02d-%02d", year, month, day) })
 end
 
 -- User commands are defined in plugin/pkb.lua, not here, so requiring this module has no side effects.

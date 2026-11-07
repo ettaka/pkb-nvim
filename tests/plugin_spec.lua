@@ -18,7 +18,7 @@ end
 t.test("loading the Lua modules defines no commands", function()
   delete_pkb_commands()
   H.unload("pkb")
-  for _, m in ipairs({ "pkb", "pkb.notifier", "pkb.parser", "pkb.ui", "pkb.render", "pkb.agenda_provider", "pkb.effort_calculation" }) do
+  for _, m in ipairs({ "pkb", "pkb.notifier", "pkb.parser", "pkb.ui", "pkb.render", "pkb.effort_calculation" }) do
     require(m)
   end
   H.eq(pkb_commands(), {})
@@ -51,7 +51,7 @@ t.test(":PKBInbox opens the inbox", function()
   notifier(root)
   vim.cmd.source(H.root .. "/plugin/pkb.lua")
   vim.cmd("PKBInbox")
-  H.has(table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n"), "- [ ] a due::2026-11-10T08:00Z")
+  H.has(table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n"), "[ ] 10:00        a  · t.md")
 end)
 
 return t

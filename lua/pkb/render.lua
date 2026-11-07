@@ -111,11 +111,66 @@ local function find_conflicts(items)
   return conflicts
 end
 
-function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf)
-  -- Forecast/expand recurring tasks up to 90 days ahead in the inbox view
+--- Task text for display: without the checkbox / list marker and the PKB tags.
+function M.display_text(line)
+  local text = tostring(line or "")
+    :gsub("^%s*%- %[[ xX]%]%s*", "") -- "- [ ] " checkbox
+    :gsub("^%s*%- %s*", "")           -- plain list marker
+  for _, tag in ipairs({ "due", "notify", "recur", "effort", "task" }) do
+    text = text:gsub("%s*" .. tag .. "::%S+", "")
+  end
+  return (text:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local SLOT_WIDTH = 11 -- "08:00–09:30"
+
+local function pad(s, width)
+  return s .. string.rep(" ", math.max(0, width - vim.fn.strdisplaywidth(s)))
+end
+
+local function day_number(ts)
+  local d = os.date("*t", ts)
+  return math.floor(os.time({ year = d.year, month = d.month, day = d.day, hour = 12 }) / 86400 + 0.5)
+end
+
+--- "08:00–08:30" (start to start + effort), "08:00" without effort, "22:00–03:00+1d" past midnight.
+function M.time_slot(n)
+  local start = os.date("%H:%M", n.due_ts)
+  local effort = get_effort_seconds(n)
+  if effort <= 0 then return start end
+  local finish = n.due_ts + effort
+  local slot = start .. "–" .. os.date("%H:%M", finish)
+  local days = day_number(finish) - day_number(n.due_ts)
+  if days > 0 then slot = slot .. "+" .. days .. "d" end
+  return slot
+end
+
+local function display_file(file, root)
+  root = root and root:gsub("/+$", "")
+  if root and root ~= "" and file:sub(1, #root + 1) == root .. "/" then
+    return file:sub(#root + 2)
+  end
+  return vim.fn.fnamemodify(file, ":t")
+end
+
+local function end_of_day(date) -- "YYYY-MM-DD" -> epoch of 23:59:59 local
+  local y, m, d = date:match("^(%d+)%-(%d+)%-(%d+)$")
+  return os.time({ year = tonumber(y), month = tonumber(m), day = tonumber(d), hour = 23, min = 59, sec = 59 })
+end
+
+--- Render the inbox into `buf`: tasks grouped by day, each with its time slot.
+--- opts.root: PKB root, files are shown relative to it.
+--- opts.focus_date ("YYYY-MM-DD"): this day is always shown (an empty section if it has no tasks), and
+--- recurring tasks are expanded at least up to it. Returns the row of its heading.
+--- @return integer|nil focus_row
+function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf, opts)
+  opts = opts or {}
   local horizon_ts = os.time() + horizon_duration
+  if opts.focus_date then
+    horizon_ts = math.max(horizon_ts, end_of_day(opts.focus_date))
+  end
   local raw_items = parser.expand_recurring_tasks(notifications, horizon_ts)
-  
+
   local items = {}
   for _, n in ipairs(raw_items) do
     if not n.line:match("^%s*%- %[[xX]%]") then
@@ -131,77 +186,64 @@ function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf)
 
   local conflicts = find_conflicts(items)
 
-  ----------------------------------------------------------------
-  -- First pass: calculate total effort for each date
-  ----------------------------------------------------------------
-
-  local daily_effort = {}
-
+  -- Group by day (items are sorted, so days come in order); add the focus day if it has no tasks.
+  local days, by_date = {}, {}
   for _, n in ipairs(items) do
     local date = os.date("%Y-%m-%d", n.due_ts)
-    local effort = get_effort_seconds(n)
-
-    if effort > 0 then
-      daily_effort[date] = (daily_effort[date] or 0) + effort
+    if not by_date[date] then
+      by_date[date] = { date = date, items = {}, effort = 0 }
+      table.insert(days, by_date[date])
     end
+    table.insert(by_date[date].items, n)
+    by_date[date].effort = by_date[date].effort + get_effort_seconds(n)
   end
-
-  ----------------------------------------------------------------
-  -- Second pass: render
-  ----------------------------------------------------------------
+  if opts.focus_date and not by_date[opts.focus_date] then
+    table.insert(days, { date = opts.focus_date, items = {}, effort = 0 })
+    table.sort(days, function(a, b) return a.date < b.date end)
+  end
 
   local lines = {}
   local line_map = {}
-  local current_date = nil
+  local focus_row
 
-  for _, n in ipairs(items) do
-    local item_date = os.date("%Y-%m-%d", n.due_ts)
-
-    if item_date ~= current_date then
-      current_date = item_date
-
-      if #lines > 0 then
-        table.insert(lines, "")
-      end
-
-      local heading = "## " .. current_date
-
-      local total = daily_effort[current_date]
-
-      if total and total > 0 then
-        heading = heading .. " — total effort: " .. format_effort(total)
-      end
-
-      table.insert(lines, heading)
+  for _, day in ipairs(days) do
+    if #lines > 0 then
+      table.insert(lines, "")
     end
 
-    local status =
-      n.dismissed and "[x]" or
-      n.triggered and "[!]" or
-      "[ ]"
+    local heading = "## " .. day.date
+    if day.effort > 0 then
+      heading = heading .. " — total effort: " .. format_effort(day.effort)
+    end
+    table.insert(lines, heading)
+    if day.date == opts.focus_date then focus_row = #lines end
 
-    local conflict_badge = conflicts[n.id] and " ⚠️ [CONFLICT]" or ""
+    if #day.items == 0 then
+      table.insert(lines, "  (no tasks)")
+    end
 
-    table.insert(
-      lines,
-      string.format(
-        "%s %s%s | %s | due %s",
-        status,
-        n.line,
-        conflict_badge,
-        n.file,
-        os.date("%H:%M", n.due_ts)
-      )
-    )
+    for _, n in ipairs(day.items) do
+      local status =
+        n.dismissed and "[x]" or
+        n.triggered and "[!]" or
+        "[ ]"
 
-    -- Map 1-based buffer line number to notification object
-    line_map[#lines] = n
+      local text = M.display_text(n.line)
+      if parser.parse_recurrence(n.line) then text = text .. " ↻" end
+      if conflicts[n.id] then text = text .. "  ⚠️ CONFLICT" end
+
+      table.insert(lines, ("%s %s  %s  · %s"):format(status, pad(M.time_slot(n), SLOT_WIDTH), text, display_file(n.file, opts.root)))
+
+      -- Map 1-based buffer line number to notification object
+      line_map[#lines] = n
+    end
   end
 
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].filetype = "markdown"
 
   M._line_map[buf] = line_map
+  return focus_row
 end
 
 function M.get_notification_at_cursor(buf)

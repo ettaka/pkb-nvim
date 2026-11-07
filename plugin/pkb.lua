@@ -2,9 +2,9 @@ vim.api.nvim_create_user_command("PKBNotify", function()
   require("pkb.notifier").notify()
 end, {})
 
-vim.api.nvim_create_user_command("PKBInbox", function()
-  require("pkb.notifier").inbox()
-end, {})
+vim.api.nvim_create_user_command("PKBInbox", function(args)
+  require("pkb.notifier").inbox({ date = args.args ~= "" and args.args or nil })
+end, { nargs = "?", desc = "PKB inbox; optional YYYY-MM-DD opens it on that day" })
 
 vim.api.nvim_create_user_command("PKBComplete", function()
   local file = vim.api.nvim_buf_get_name(0)

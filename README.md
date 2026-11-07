@@ -2,6 +2,23 @@
 
 A simple Neovim plugin template for PKB.
 
+## Inbox
+
+`:PKBInbox` lists open tasks by day, each with its time slot (`due` to `due` + `effort`):
+
+```
+## 2026-11-10 — total effort: 5h
+[ ] 08:00–08:30  Water plants ↻  · tasks.md
+[!] 11:00–12:30  Meeting  ⚠️ CONFLICT  · work/meetings.md
+[ ] 13:00        Call the bank  · tasks.md
+```
+
+`[!]` notified, `[x]` dismissed (shown with `t`), `↻` recurring, `⚠️ CONFLICT` overlapping slots.
+Keys: `<CR>` open the task, `c` complete, `s` skip, `d` dismiss, `t` show/hide dismissed, `q` close.
+
+`:PKBInbox 2026-11-12` (or `require("pkb.notifier").open_day(2026, 11, 12)`, which calendar-nvim calls) opens it
+with the cursor on that day; a day without tasks gets an empty section.
+
 ## Tests
 
 ```sh
