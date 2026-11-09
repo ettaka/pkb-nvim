@@ -125,6 +125,8 @@ end
 local SLOT_WIDTH = 11 -- "08:00–09:30"
 
 --- Display column (0-based) where a task's text starts: "[ ] " + slot + two spaces. Wrapped lines indent to it.
+--- This is the usual value; an inbox with a past-midnight slot ("23:30–00:30+1d") uses a wider slot column, and
+--- render_inbox returns the column it used.
 M.TEXT_COLUMN = 4 + SLOT_WIDTH + 2
 
 local function pad(s, width)
@@ -178,6 +180,7 @@ end
 --- opts.tz_offset (seconds east of UTC) and opts.tz_label: show times and days at that fixed offset, under a
 --- "Times in <label>" header.
 --- @return integer|nil focus_row
+--- @return integer text_column display column where task text starts (see M.TEXT_COLUMN)
 function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf, opts)
   opts = opts or {}
   local horizon_ts = os.time() + horizon_duration
@@ -217,6 +220,13 @@ function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf, op
     table.sort(days, function(a, b) return a.date < b.date end)
   end
 
+  -- One slot width for the whole inbox, so the task text lines up even when a slot runs past midnight.
+  local slots, slot_width = {}, SLOT_WIDTH
+  for _, n in ipairs(items) do
+    slots[n] = M.time_slot(n, opts.tz_offset)
+    slot_width = math.max(slot_width, vim.fn.strdisplaywidth(slots[n]))
+  end
+
   local lines = {}
   local line_map = {}
   local focus_row
@@ -250,7 +260,7 @@ function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf, op
       if parser.parse_recurrence(n.line) then text = text .. " ↻" end
       if conflicts[n.id] then text = text .. "  ⚠️ CONFLICT" end
 
-      table.insert(lines, ("%s %s  %s  · %s"):format(status, pad(M.time_slot(n, opts.tz_offset), SLOT_WIDTH), text, display_file(n.file, opts.root)))
+      table.insert(lines, ("%s %s  %s  · %s"):format(status, pad(slots[n], slot_width), text, display_file(n.file, opts.root)))
 
       -- Map 1-based buffer line number to notification object
       line_map[#lines] = n
@@ -261,7 +271,7 @@ function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf, op
   vim.bo[buf].filetype = "markdown"
 
   M._line_map[buf] = line_map
-  return focus_row
+  return focus_row, 4 + slot_width + 2
 end
 
 function M.get_notification_at_cursor(buf)

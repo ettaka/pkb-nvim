@@ -556,19 +556,24 @@ function M.inbox(opts)
   vim.bo[buf].bufhidden = "wipe"
 
   local render_opts = { root = M.PKB_ROOT, focus_date = opts.date, tz_offset = tz_offset, tz_label = tz_label }
+  -- Long lines (narrow phone screens) wrap at a word and continue under the task text, not under the status.
+  -- [0] makes these local to the inbox buffer in its window (like :setlocal), so the next buffer is unaffected.
+  -- The text column can change between renders (a past-midnight slot widens it), so it is set after each one.
   local function render()
-    return render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf, render_opts)
+    local focus, text_column = render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf, render_opts)
+    for _, win in ipairs(vim.fn.win_findbuf(buf)) do
+      vim.wo[win][0].breakindentopt = "shift:" .. text_column
+    end
+    return focus, text_column
   end
 
-  local focus_row = render()
+  local focus_row, text_column = render()
   vim.api.nvim_set_current_buf(buf)
-  -- Long lines (narrow phone screens) wrap at a word and continue under the task text, not under the status.
-  -- [0] makes these local to the inbox buffer in this window (like :setlocal), so the next buffer is unaffected.
   local wo = vim.wo[0][0]
   wo.wrap = true
   wo.linebreak = true
   wo.breakindent = true
-  wo.breakindentopt = "shift:" .. require("pkb.render").TEXT_COLUMN
+  wo.breakindentopt = "shift:" .. text_column
   if focus_row then
     vim.api.nvim_win_set_cursor(0, { focus_row, 0 })
   end

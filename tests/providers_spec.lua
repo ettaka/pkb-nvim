@@ -38,7 +38,8 @@ end
 local function items(section)
   local out = {}
   for i = 2, #section do
-    table.insert(out, (section[i]:gsub("^%[.%] ", ""):gsub("%s+· %S+$", "")))
+    -- slot, then the text; the padding between them depends on the widest slot in the inbox
+    table.insert(out, (section[i]:gsub("^%[.%] ", ""):gsub("%s+· %S+$", ""):gsub("^(%S+)%s+", "%1  ")))
   end
   return out
 end
@@ -92,7 +93,7 @@ end)
 
 t.test("day view: a task without effort shows only its start time", function()
   local section = day_view(setup_pkb({ "- [ ] call bank due::2026-11-10T08:00Z" }), 2026, 11, 10)
-  H.eq(items(section), { "10:00        call bank" })
+  H.eq(items(section), { "10:00  call bank" })
 end)
 
 t.test("day view: a slot running past midnight shows the day offset", function()
@@ -388,6 +389,47 @@ t.test(":PKBInbox takes tz= and a date in any order", function()
   H.eq(vim.api.nvim_get_current_line(), "## 2026-11-09 — total effort: 1h")
   vim.cmd("PKBInbox 2026-11-10")
   H.eq(vim.api.nvim_get_current_line(), "## 2026-11-10 — total effort: 1h 30min")
+end)
+
+---------------------------------------------------------------- past-midnight slots keep the columns aligned
+t.test("inbox: a past-midnight slot widens the slot column so all task text stays aligned", function()
+  local root = H.tmpdir()
+  H.write(root .. "/t.md", {
+    "- [ ] early due::2026-11-10T06:00Z effort::30min",
+    "- [ ] nine due::2026-11-10T07:00Z",
+    "- [ ] late night due::2026-11-10T21:30Z effort::1h",
+  })
+  local n = notifier(root)
+  n.inbox({})
+  H.eq(vim.api.nvim_buf_get_lines(0, 0, -1, false), {
+    "## 2026-11-10 — total effort: 1h 30min",
+    "[ ] 08:00–08:30     early  · t.md",
+    "[ ] 09:00           nine  · t.md",
+    "[ ] 23:30–00:30+1d  late night  · t.md",
+  })
+  H.eq(vim.wo.breakindentopt, "shift:20", "wrapped lines indent to the wider text column")
+end)
+
+t.test("inbox: without past-midnight slots the columns stay narrow", function()
+  local root = H.tmpdir()
+  H.write(root .. "/t.md", { "- [ ] early due::2026-11-10T06:00Z effort::30min" })
+  local n = notifier(root)
+  n.inbox({})
+  H.eq(vim.api.nvim_buf_get_lines(0, 1, 2, false), { "[ ] 08:00–08:30  early  · t.md" })
+  H.eq(vim.wo.breakindentopt, "shift:17")
+end)
+
+---------------------------------------------------------------- tz= is only a view
+t.test("inbox tz= changes nothing outside the inbox: TZ, local time, new timestamps", function()
+  local actions = require("timestamps.actions")
+  local fixed = 1794297600 -- 2026-11-10T08:00Z = 10:00 in Helsinki
+  local function snapshot()
+    return { vim.env.TZ, os.date("%z", fixed), os.date("%H:%M", fixed), actions.get_timestamp(fixed) }
+  end
+  local before = snapshot()
+  tz_inbox({ tz = "-06:00" })
+  H.eq(snapshot(), before)
+  H.eq(before[4], "2026-11-10T10:00H")
 end)
 
 return t
