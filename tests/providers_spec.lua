@@ -301,4 +301,93 @@ t.test("inbox: a wrapped line continues under the task text, after the time slot
   H.eq({ vim.wo[win].breakindent, vim.wo[win].linebreak }, { false, false })
 end)
 
+---------------------------------------------------------------- inbox in another offset (:PKBInbox tz=-06:00)
+-- In Helsinki (+02:00): early 05:00, late 22:00, both on 2026-11-10. In -06:00, early is 21:00 the day before.
+local TZ_NOTE = { "- [ ] early due::2026-11-10T03:00Z effort::1h", "- [ ] late due::2026-11-10T20:00Z effort::30min" }
+
+local function tz_inbox(opts)
+  local root = H.tmpdir()
+  H.write(root .. "/t.md", TZ_NOTE)
+  local n = notifier(root)
+  n.inbox(opts)
+  return vim.api.nvim_buf_get_lines(0, 0, -1, false), n
+end
+
+t.test("inbox tz=-06:00: times and days in that offset, with a header saying so", function()
+  H.eq(tz_inbox({ tz = "-06:00" }), {
+    "Times in UTC-06:00",
+    "",
+    "## 2026-11-09 — total effort: 1h",
+    "[ ] 21:00–22:00  early  · t.md",
+    "",
+    "## 2026-11-10 — total effort: 30min",
+    "[ ] 14:00–14:30  late  · t.md",
+  })
+end)
+
+t.test("inbox without tz: local time and no header", function()
+  H.eq(tz_inbox({}), {
+    "## 2026-11-10 — total effort: 1h 30min",
+    "[ ] 05:00–06:00  early  · t.md",
+    "[ ] 22:00–22:30  late  · t.md",
+  })
+end)
+
+local tz_forms = {
+  { "Z",      "Times in UTC",        "[ ] 03:00–04:00  early  · t.md" },
+  { "+05:30", "Times in UTC+05:30",  "[ ] 08:30–09:30  early  · t.md" },
+  { "-6",     "Times in UTC-06:00",  "[ ] 21:00–22:00  early  · t.md" },
+  { "+3",     "Times in UTC+03:00",  "[ ] 06:00–07:00  early  · t.md" },
+  { "-06",    "Times in UTC-06:00",  "[ ] 21:00–22:00  early  · t.md" },
+  { "H",      "Times in UTC+02:00",  "[ ] 05:00–06:00  early  · t.md" },
+  { "S",      "Times in UTC+03:00",  "[ ] 06:00–07:00  early  · t.md" },
+}
+for _, c in ipairs(tz_forms) do
+  t.test("inbox tz=" .. c[1], function()
+    local lines = tz_inbox({ tz = c[1] })
+    H.eq(lines[1], c[2])
+    H.has(table.concat(lines, "\n"), c[3])
+  end)
+end
+
+for _, bad in ipairs({ "6", "+25:00", "+05:61", "EST", "America/Chicago" }) do
+  t.test("inbox rejects tz=" .. bad .. " with a warning", function()
+    local before = vim.api.nvim_get_current_buf()
+    tz_inbox({ tz = bad })
+    H.eq(vim.api.nvim_get_current_buf(), before, "no inbox opened")
+    H.has(H.messages[#H.messages], "tz")
+  end)
+end
+
+t.test("inbox tz with a date: the day is that offset's day, cursor on it", function()
+  local lines = tz_inbox({ tz = "-06:00", date = "2026-11-09" })
+  H.eq(lines[vim.api.nvim_win_get_cursor(0)[1]], "## 2026-11-09 — total effort: 1h")
+end)
+
+t.test("inbox tz: an empty focus day in that offset gets its own section", function()
+  local lines = tz_inbox({ tz = "-06:00", date = "2026-11-08" })
+  H.eq(vim.list_slice(lines, 1, 5), { "Times in UTC-06:00", "", "## 2026-11-08", "  (no tasks)", "" })
+end)
+
+t.test("inbox tz: the offset stays when the inbox re-renders (t)", function()
+  tz_inbox({ tz = "-06:00" })
+  vim.fn.maparg("t", "n", false, true).callback()
+  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  H.eq(lines[1], "Times in UTC-06:00")
+  H.has(table.concat(lines, "\n"), "[ ] 21:00–22:00  early")
+end)
+
+t.test(":PKBInbox takes tz= and a date in any order", function()
+  local root = H.tmpdir()
+  H.write(root .. "/t.md", TZ_NOTE)
+  notifier(root)
+  vim.cmd.source(H.root .. "/plugin/pkb.lua")
+  vim.cmd("PKBInbox tz=-06:00")
+  H.eq(vim.api.nvim_buf_get_lines(0, 0, 1, false)[1], "Times in UTC-06:00")
+  vim.cmd("PKBInbox tz=-06:00 2026-11-09")
+  H.eq(vim.api.nvim_get_current_line(), "## 2026-11-09 — total effort: 1h")
+  vim.cmd("PKBInbox 2026-11-10")
+  H.eq(vim.api.nvim_get_current_line(), "## 2026-11-10 — total effort: 1h 30min")
+end)
+
 return t

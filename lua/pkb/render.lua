@@ -131,19 +131,26 @@ local function pad(s, width)
   return s .. string.rep(" ", math.max(0, width - vim.fn.strdisplaywidth(s)))
 end
 
-local function day_number(ts)
-  local d = os.date("*t", ts)
+--- os.date for `ts` in local time, or at a fixed UTC offset (seconds) when one is given.
+local function date_at(fmt, ts, tz_offset)
+  if tz_offset then return os.date("!" .. fmt, ts + tz_offset) end
+  return os.date(fmt, ts)
+end
+
+local function day_number(ts, tz_offset)
+  local d = date_at("*t", ts, tz_offset)
   return math.floor(os.time({ year = d.year, month = d.month, day = d.day, hour = 12 }) / 86400 + 0.5)
 end
 
 --- "08:00–08:30" (start to start + effort), "08:00" without effort, "22:00–03:00+1d" past midnight.
-function M.time_slot(n)
-  local start = os.date("%H:%M", n.due_ts)
+--- tz_offset (seconds east of UTC): show the slot at that fixed offset instead of local time.
+function M.time_slot(n, tz_offset)
+  local start = date_at("%H:%M", n.due_ts, tz_offset)
   local effort = get_effort_seconds(n)
   if effort <= 0 then return start end
   local finish = n.due_ts + effort
-  local slot = start .. "–" .. os.date("%H:%M", finish)
-  local days = day_number(finish) - day_number(n.due_ts)
+  local slot = start .. "–" .. date_at("%H:%M", finish, tz_offset)
+  local days = day_number(finish, tz_offset) - day_number(n.due_ts, tz_offset)
   if days > 0 then slot = slot .. "+" .. days .. "d" end
   return slot
 end
@@ -156,8 +163,11 @@ local function display_file(file, root)
   return vim.fn.fnamemodify(file, ":t")
 end
 
-local function end_of_day(date) -- "YYYY-MM-DD" -> epoch of 23:59:59 local
+local function end_of_day(date, tz_offset) -- "YYYY-MM-DD" -> epoch of 23:59:59 local (or at tz_offset)
   local y, m, d = date:match("^(%d+)%-(%d+)%-(%d+)$")
+  if tz_offset then
+    return require("timestamps.parser").parse_iso(date .. "T23:59Z") + 59 - tz_offset
+  end
   return os.time({ year = tonumber(y), month = tonumber(m), day = tonumber(d), hour = 23, min = 59, sec = 59 })
 end
 
@@ -165,12 +175,14 @@ end
 --- opts.root: PKB root, files are shown relative to it.
 --- opts.focus_date ("YYYY-MM-DD"): this day is always shown (an empty section if it has no tasks), and
 --- recurring tasks are expanded at least up to it. Returns the row of its heading.
+--- opts.tz_offset (seconds east of UTC) and opts.tz_label: show times and days at that fixed offset, under a
+--- "Times in <label>" header.
 --- @return integer|nil focus_row
 function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf, opts)
   opts = opts or {}
   local horizon_ts = os.time() + horizon_duration
   if opts.focus_date then
-    horizon_ts = math.max(horizon_ts, end_of_day(opts.focus_date))
+    horizon_ts = math.max(horizon_ts, end_of_day(opts.focus_date, opts.tz_offset))
   end
   local raw_items = parser.expand_recurring_tasks(notifications, horizon_ts)
 
@@ -192,7 +204,7 @@ function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf, op
   -- Group by day (items are sorted, so days come in order); add the focus day if it has no tasks.
   local days, by_date = {}, {}
   for _, n in ipairs(items) do
-    local date = os.date("%Y-%m-%d", n.due_ts)
+    local date = date_at("%Y-%m-%d", n.due_ts, opts.tz_offset)
     if not by_date[date] then
       by_date[date] = { date = date, items = {}, effort = 0 }
       table.insert(days, by_date[date])
@@ -208,6 +220,9 @@ function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf, op
   local lines = {}
   local line_map = {}
   local focus_row
+  if opts.tz_offset then
+    table.insert(lines, "Times in " .. (opts.tz_label or "another offset"))
+  end
 
   for _, day in ipairs(days) do
     if #lines > 0 then
@@ -235,7 +250,7 @@ function M.render_inbox(notifications, inbox_show_all, horizon_duration, buf, op
       if parser.parse_recurrence(n.line) then text = text .. " ↻" end
       if conflicts[n.id] then text = text .. "  ⚠️ CONFLICT" end
 
-      table.insert(lines, ("%s %s  %s  · %s"):format(status, pad(M.time_slot(n), SLOT_WIDTH), text, display_file(n.file, opts.root)))
+      table.insert(lines, ("%s %s  %s  · %s"):format(status, pad(M.time_slot(n, opts.tz_offset), SLOT_WIDTH), text, display_file(n.file, opts.root)))
 
       -- Map 1-based buffer line number to notification object
       line_map[#lines] = n

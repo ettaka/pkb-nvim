@@ -507,11 +507,43 @@ end
 
 --- Open the inbox in the current window: tasks by day, each with its time slot.
 --- opts.date ("YYYY-MM-DD"): put the cursor on that day; it is shown even if it has no tasks.
+--- A fixed UTC offset for the inbox: "Z"/"UTC", "H"/"S" (home offsets of timestamps-nvim), "+hh:mm", "-hh", "+h".
+--- @return integer|nil seconds east of UTC
+--- @return string label ("UTC-06:00") or the error message
+function M.parse_tz(tz)
+  local s = tz
+  if s == "Z" or s == "UTC" then return 0, "UTC" end
+  if s == "H" or s == "S" then
+    local P = require("timestamps.parser")
+    s = s == "H" and P.HOME_TZ or P.HOME_SUMMER_TZ
+  end
+  local sign, hh, mm = s:match("^([%+%-])(%d%d?):(%d%d)$")
+  if not sign then
+    sign, hh = s:match("^([%+%-])(%d%d?)$")
+    mm = "0"
+  end
+  hh, mm = tonumber(hh), tonumber(mm)
+  if not sign or hh > 14 or mm > 59 then
+    return nil, ("[PKB] Inbox tz must be a UTC offset like -06:00, +05:30, -6, Z, H or S, got %s"):format(tz)
+  end
+  local offset = (sign == "-" and -1 or 1) * (hh * 3600 + mm * 60)
+  if offset == 0 then return 0, "UTC" end
+  return offset, ("UTC%s%02d:%02d"):format(sign, hh, mm)
+end
+
 function M.inbox(opts)
   opts = opts or {}
   if opts.date and not opts.date:match("^%d%d%d%d%-%d%d%-%d%d$") then
     vim.notify("[PKB] Inbox date must be YYYY-MM-DD, got " .. opts.date, vim.log.levels.WARN)
     return
+  end
+  local tz_offset, tz_label
+  if opts.tz then
+    tz_offset, tz_label = M.parse_tz(opts.tz)
+    if not tz_offset then
+      vim.notify(tz_label, vim.log.levels.WARN)
+      return
+    end
   end
   M.notify()
 
@@ -523,7 +555,7 @@ function M.inbox(opts)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
 
-  local render_opts = { root = M.PKB_ROOT, focus_date = opts.date }
+  local render_opts = { root = M.PKB_ROOT, focus_date = opts.date, tz_offset = tz_offset, tz_label = tz_label }
   local function render()
     return render_inbox(M.notifications, M.inbox_show_all, M.DEFAULT_HORIZON, buf, render_opts)
   end

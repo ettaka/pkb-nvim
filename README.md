@@ -19,6 +19,10 @@ Keys: `<CR>` open the task, `c` complete, `s` skip, `d` dismiss, `t` show/hide d
 `:PKBInbox 2026-11-12` (or `require("pkb.notifier").open_day(2026, 11, 12)`, which calendar-nvim calls) opens it
 with the cursor on that day; a day without tasks gets an empty section.
 
+`:PKBInbox tz=-06:00` shows the times and days at another UTC offset (`+05:30`, `-6`, `Z`, and the home letters
+`H`/`S` also work), under a `Times in UTC-06:00` header; the notes are not changed. It combines with a date:
+`:PKBInbox 2026-11-12 tz=-06:00` (the date is then that offset's day). From Lua: `notifier.inbox({ tz = "-06:00" })`.
+
 ## Recurrence
 
 `recur::<rule>` repeats a task; completing or skipping it writes the next instance below it.

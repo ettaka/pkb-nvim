@@ -3,8 +3,13 @@ vim.api.nvim_create_user_command("PKBNotify", function()
 end, {})
 
 vim.api.nvim_create_user_command("PKBInbox", function(args)
-  require("pkb.notifier").inbox({ date = args.args ~= "" and args.args or nil })
-end, { nargs = "?", desc = "PKB inbox; optional YYYY-MM-DD opens it on that day" })
+  local opts = {}
+  for _, arg in ipairs(args.fargs) do
+    local tz = arg:match("^tz=(.*)$")
+    if tz then opts.tz = tz else opts.date = arg end
+  end
+  require("pkb.notifier").inbox(opts)
+end, { nargs = "*", desc = "PKB inbox; [YYYY-MM-DD] opens it on that day, [tz=-06:00] shows times at that offset" })
 
 vim.api.nvim_create_user_command("PKBComplete", function()
   local file = vim.api.nvim_buf_get_name(0)
