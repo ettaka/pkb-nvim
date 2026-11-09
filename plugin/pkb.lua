@@ -33,3 +33,7 @@ vim.api.nvim_create_user_command("PKBComplete", function()
 
   require("pkb.notifier").complete_task(entry)
 end, {})
+
+vim.api.nvim_create_user_command("PKBExport", function()
+  require("pkb.export").run()
+end, { desc = "Export the pages selected by this export page (export::<name>) to a fresh git repo" })

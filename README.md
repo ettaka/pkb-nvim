@@ -51,6 +51,46 @@ require("pkb.notifier").setup({
 })
 ```
 
+## Export
+
+`:PKBExport` copies a subselection of the PKB into a fresh git repo (one commit, no history, no remote), e.g.
+to hand notes over without anything else. Run it on an export page, an ordinary note in the PKB:
+
+```markdown
+# Security review 2026-11
+export::security-review
+
+## Seeds
+- [[projects/kqc-simulations]]
+- [[howto/ssh-setup]] depth::2
+
+## Settings
+depth::1
+dates::2026-09-01..2026-11-30
+out::~/pkb-export/security-review
+
+## Never
+- people/
+- [[2026-10-14]]
+- #private
+
+## Forbidden words
+- customer-x
+```
+
+- **Seeds** are exported, and so are the pages they link to, up to `depth` links away (default 1; a seed's own
+  `depth::` overrides it). `[[page#heading]]` exports the whole page. Task references (`t-…` ids) count as links
+  to the page with that `task::` tag. Images and other files linked from exported pages are copied too.
+- **dates** limits daily notes (`YYYY-MM-DD.md`) reached by links; open ends work (`2026-09-01..`).
+- **Never** (folders, pages, `#tags`) is never exported, and links into it are not followed. The export page
+  itself is never exported.
+- In the copy, links to pages that are not exported become plain text. Nothing else is changed (tags stay).
+- **Forbidden words** (case-insensitive) in the copy block writing.
+
+`:PKBExport` first shows a report (pages and why, skipped pages, links turned into text, forbidden words);
+`w` writes, `<CR>` opens a page, `q` cancels. `out` (default `~/pkb-export/<name>`) is rebuilt from scratch on
+every export; a folder that is not an earlier export is never overwritten.
+
 ## Tests
 
 ```sh

@@ -3,7 +3,7 @@ local H = require("tests.helpers")
 local t = H.suite()
 local notifier = require("tests.pkb").notifier
 
-local COMMANDS = { "PKBComplete", "PKBInbox", "PKBNotify" }
+local COMMANDS = { "PKBComplete", "PKBExport", "PKBInbox", "PKBNotify" }
 
 local function pkb_commands()
   local names = vim.tbl_filter(function(name) return name:match("^PKB") end, vim.tbl_keys(vim.api.nvim_get_commands({})))
