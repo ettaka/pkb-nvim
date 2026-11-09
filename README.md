@@ -81,8 +81,12 @@ out::~/pkb-export/security-review
 - **Seeds** are exported, and so are the pages they link to, up to `depth` links away (default 1; a seed's own
   `depth::` overrides it). `[[page#heading]]` exports the whole page. Task references (`t-…` ids) count as links
   to the page with that `task::` tag. Images and other files linked from exported pages are copied too.
+- File links may be relative to the page, start from the PKB root (`/papers/x.pdf`), or be absolute
+  (`/home/me/pkb/papers/x.pdf`, `~/Documents/x.pdf`; `%20` and `<path with spaces>` work). Files outside the PKB
+  are copied to `_external/`, and absolute links are rewritten relative to the page, so the copy contains no
+  paths from your machine.
 - **dates** limits daily notes (`YYYY-MM-DD.md`) reached by links; open ends work (`2026-09-01..`).
-- **Never** (folders, pages, `#tags`) is never exported, and links into it are not followed. The export page
+- **Never** (folders, pages, `#tags`, and absolute folders such as `~/Documents/private/`) is never exported, and links into it are not followed. The export page
   itself is never exported.
 - In the copy, links to pages that are not exported become plain text. Nothing else is changed (tags stay).
 - **Forbidden words** (case-insensitive) in the copy block writing.

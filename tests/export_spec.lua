@@ -177,11 +177,6 @@ t.test("copy: a forbidden word in the export name is reported too (it goes into 
   H.eq(plan_for(def_file).forbidden, { { rel = "export::hunter2-review", line = 0, word = "hunter2" } })
 end)
 
----------------------------------------------------------------- writing
-local function git(dir, ...)
-  return vim.trim(vim.system({ "git", "-C", dir, ... }, { text = true }):wait().stdout)
-end
-
 local function with_identity()
   for k, v in pairs({ GIT_AUTHOR_NAME = "Owner", GIT_AUTHOR_EMAIL = "owner@example.com",
                       GIT_COMMITTER_NAME = "Owner", GIT_COMMITTER_EMAIL = "owner@example.com" }) do
@@ -190,6 +185,80 @@ local function with_identity()
     H.defer(function() vim.env[k] = old end)
   end
 end
+
+---------------------------------------------------------------- file links: root-relative, absolute, outside the PKB
+local function file_links_pkb(extra_never)
+  local root, ext = H.tmpdir(), H.tmpdir()
+  H.write(root .. "/papers/qc.pdf", { "QC" })
+  H.write(root .. "/notes/local.pdf", { "LOCAL" })
+  H.write(ext .. "/docs/report final.pdf", { "REPORT" })
+  H.write(ext .. "/other/report final.pdf", { "OTHER REPORT" })
+  H.write(ext .. "/private/salary.pdf", { "SALARY" })
+  H.write(root .. "/notes/a.md", {
+    "root-relative [qc](/papers/qc.pdf)",
+    "absolute inside [qc2](" .. root .. "/papers/qc.pdf \"a title\")",
+    "absolute outside [r](" .. ext .. "/docs/report%20final.pdf)",
+    "angle brackets ![r2](<" .. ext .. "/other/report final.pdf>)",
+    "never [s](" .. ext .. "/private/salary.pdf)",
+    "page-relative [l](local.pdf)",
+    "wiki absolute [[" .. root .. "/papers/qc.pdf]]",
+    "wiki never [[" .. ext .. "/private/salary.pdf]]",
+  })
+  local out = root .. "-out"
+  H.defer(function() vim.fn.delete(out, "rf") end)
+  local def_file = H.write(root .. "/x.md", { "export::x", "## Seeds", "- [[notes/a]]", "## Settings", "out::" .. out,
+                                              "## Never", "- " .. ext .. "/private/", extra_never })
+  notifier(root)
+  return root, ext, def_file, out
+end
+
+t.test("file links: root-relative, absolute and outside-the-PKB files are followed and copied", function()
+  local _, _, def_file = file_links_pkb()
+  local plan = plan_for(def_file)
+  H.eq(rels(plan.files), { "_external/report final-2.pdf", "_external/report final.pdf", "notes/local.pdf", "papers/qc.pdf" })
+  H.eq(plan.missing, {})
+end)
+
+t.test("file links: absolute paths are rewritten relative to the page; no home path left in the copy", function()
+  local root, ext, def_file = file_links_pkb()
+  local a = plan_for(def_file).content["notes/a.md"]
+  H.eq(a, {
+    "root-relative [qc](/papers/qc.pdf)",
+    "absolute inside [qc2](../papers/qc.pdf \"a title\")",
+    "absolute outside [r](../_external/report%20final.pdf)",
+    "angle brackets ![r2](<../_external/report final-2.pdf>)",
+    "never s",
+    "page-relative [l](local.pdf)",
+    "wiki absolute [[../papers/qc.pdf]]",
+    "wiki never salary.pdf",
+  })
+  local all = table.concat(a, "\n")
+  H.ok(not all:find(root, 1, true) and not all:find(ext, 1, true), all)
+end)
+
+t.test("file links: Never takes absolute folders; the report shows where outside files come from", function()
+  local _, ext, def_file = file_links_pkb()
+  local plan = plan_for(def_file)
+  H.eq(vim.tbl_map(function(s) return s.reason end, plan.skipped), { "never (" .. ext .. "/private/)" })
+  local report = table.concat((require("pkb.export").report_lines(plan)), "\n")
+  H.has(report, "_external/report final.pdf  ← notes/a.md  (" .. ext .. "/docs/report final.pdf)")
+end)
+
+t.test("file links: the written repo has the outside files", function()
+  with_identity()
+  local _, _, def_file, out = file_links_pkb()
+  local ok, msg = require("pkb.export").write(plan_for(def_file))
+  H.eq(ok, true, msg)
+  H.eq(read(out .. "/_external/report final.pdf"), { "REPORT" })
+  H.eq(read(out .. "/_external/report final-2.pdf"), { "OTHER REPORT" })
+  H.eq(read(out .. "/papers/qc.pdf"), { "QC" })
+end)
+
+---------------------------------------------------------------- writing
+local function git(dir, ...)
+  return vim.trim(vim.system({ "git", "-C", dir, ... }, { text = true }):wait().stdout)
+end
+
 
 t.test("write: a fresh repo with one commit holding exactly the selected files", function()
   with_identity()

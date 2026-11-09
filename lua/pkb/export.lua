@@ -108,27 +108,49 @@ local function index(root)
   return idx
 end
 
---- The relative path a link target refers to, or nil. `from` is the page the link is on.
-local function resolve(idx, target, from)
-  target = trim(target:gsub("|.*$", ""):gsub("#.*$", ""))
-  if target == "" or target:match("^%a[%w+.-]*:") then return nil end -- empty or a URL
-  local is_page = not target:match("%.%w+$") or target:match("%.md$")
-  local candidates = {}
-  local function add(p) table.insert(candidates, (vim.fs.normalize(p):gsub("^%./", ""))) end
-  local name = is_page and target:gsub("%.md$", "") .. ".md" or target
-  add(name)
-  local dir = vim.fs.dirname(from)
-  if dir ~= "." then add(dir .. "/" .. name) end
-  for _, c in ipairs(candidates) do
-    if idx.files[c] then return c end
+local function is_url(path) return path:match("^%a[%w+.-]*:") ~= nil end
+
+--- What a link path refers to: { rel = <path in the PKB> } or { abs = <file outside the PKB> }, or nil.
+--- rel results also say whether the link was written as an absolute path (absolute = true).
+--- `from` is the page the link is on. Paths may be relative to that page or to the PKB root, written from the
+--- root with a leading "/" (/papers/x.pdf), absolute (/home/me/pkb/papers/x.pdf, ~/Documents/x.pdf) or a bare
+--- page name found anywhere in the PKB ([[name]]).
+local function resolve(idx, path, from)
+  path = trim(path)
+  if path == "" or is_url(path) then return nil end
+  if path:match("^~") or path:match("^/") then
+    local abs = vim.fs.normalize(vim.fn.expand(path))
+    local stat = vim.uv.fs_stat(abs)
+    if stat and stat.type == "file" then
+      local rel = rel_path(idx.root, abs)
+      if rel then return { rel = rel, absolute = true } end
+      return { abs = abs }
+    end
+    if path:match("^/") and idx.files[path:sub(2)] then return { rel = path:sub(2) } end -- from the PKB root
+    if path:match("^/") and idx.files[path:sub(2) .. ".md"] then return { rel = path:sub(2) .. ".md" } end
+    return nil
   end
-  if not target:find("/", 1, true) then
-    local matches = idx.by_name[is_page and target:gsub("%.md$", "") or target]
-    if matches then return matches[1] end
+  local is_page = not path:match("%.%w+$") or path:match("%.md$")
+  local name = is_page and path:gsub("%.md$", "") .. ".md" or path
+  local candidates = { (vim.fs.normalize(name):gsub("^%./", "")) }
+  local dir = vim.fs.dirname(from)
+  if dir ~= "." then table.insert(candidates, (vim.fs.normalize(dir .. "/" .. name):gsub("^%./", ""))) end
+  for _, c in ipairs(candidates) do
+    if idx.files[c] then return { rel = c } end
+  end
+  if not path:find("/", 1, true) then
+    local matches = idx.by_name[is_page and path:gsub("%.md$", "") or path]
+    if matches then return { rel = matches[1] } end
   end
 end
 
---- Every link on a page: { kind = "wiki"|"md", s, e (byte range of the whole link), target, text, embed }.
+local function url_decode(s)
+  return (s:gsub("%%(%x%x)", function(h) return string.char(tonumber(h, 16)) end))
+end
+
+--- Every link on a line: { kind = "wiki"|"md", s, e (byte range of the whole link), path (decoded),
+--- text (shown when the link is turned into plain text), embed, and how to write it back: rest (wiki: #heading
+--- and |alias; md: a "title"), angle (<path>), encoded (%20) }.
 local function links_in(line)
   local out = {}
   local pos = 1
@@ -136,25 +158,60 @@ local function links_in(line)
     local s, e, inner = line:find("%[%[([^%]]+)%]%]", pos)
     if not s then break end
     local embed = s > 1 and line:sub(s - 1, s - 1) == "!"
-    table.insert(out, { kind = "wiki", s = embed and s - 1 or s, e = e, target = inner, embed = embed,
-                        text = inner:match("|(.*)$") or inner })
+    local path, rest = inner:match("^([^|#]*)(.*)$")
+    -- as plain text: the alias, else the link; an absolute path only by its file name (no home folder in the copy)
+    local text = inner:match("|(.*)$") or (path:match("^[/~]") and vim.fs.basename(path) .. rest) or inner
+    table.insert(out, { kind = "wiki", s = embed and s - 1 or s, e = e, path = path, rest = rest, embed = embed,
+                        text = text })
     pos = e + 1
   end
   pos = 1
   while true do
-    local s, e, bang, text, target = line:find("(!?)%[([^%]]*)%]%(([^%)%s]+)%)", pos)
+    local s, e, bang, text, inside = line:find("(!?)%[([^%]]*)%]%(([^%)]+)%)", pos)
     if not s then break end
     local inside_wiki = false
     for _, l in ipairs(out) do
       if s >= l.s and s <= l.e then inside_wiki = true end
     end
     if not inside_wiki then
-      table.insert(out, { kind = "md", s = s, e = e, target = target, text = text, embed = bang == "!" })
+      local path, rest = inside:match("^<([^>]*)>(.*)$")
+      local angle = path ~= nil
+      if not angle then path, rest = inside:match("^(%S+)(.*)$") end
+      if path then
+        local decoded = url_decode(path)
+        table.insert(out, { kind = "md", s = s, e = e, path = decoded:gsub("#.*$", ""), anchor = decoded:match("#.*$"),
+                            rest = rest, text = text, embed = bang == "!", angle = angle, encoded = decoded ~= path })
+      end
     end
     pos = e + 1
   end
   table.sort(out, function(a, b) return a.s < b.s end)
   return out
+end
+
+--- Path from folder `from_dir` (PKB-relative, "." for the root) to PKB-relative `to`.
+local function relative_to(from_dir, to)
+  local a = from_dir == "." and {} or vim.split(from_dir, "/", { plain = true })
+  local b = vim.split(to, "/", { plain = true })
+  local i = 1
+  while i <= #a and i < #b and a[i] == b[i] do i = i + 1 end
+  local parts = {}
+  for _ = i, #a do table.insert(parts, "..") end
+  for k = i, #b do table.insert(parts, b[k]) end
+  return table.concat(parts, "/")
+end
+
+--- The link written back with a new path.
+local function relink(link, path)
+  local bang = link.embed and "!" or ""
+  if link.kind == "wiki" then return ("%s[[%s%s]]"):format(bang, path, link.rest) end
+  path = path .. (link.anchor or "")
+  if link.angle or (path:find(" ", 1, true) and not link.encoded) then
+    path = "<" .. path .. ">"
+  elseif link.encoded then
+    path = path:gsub(" ", "%%20")
+  end
+  return ("%s[%s](%s%s)"):format(bang, link.text, path, link.rest)
 end
 
 local function is_daily(rel)
@@ -202,18 +259,23 @@ function M.plan(def_file, def_lines)
   local idx = index(root)
 
   -- Why a page may not be exported (nil if it may).
-  local function refused(rel, is_seed)
+  local function refused(rel, is_seed, abs)
     if rel == plan.def_rel then return "export page" end
+    abs = abs or (root .. "/" .. rel)
     for _, rule in ipairs(def.never) do
-      if rule:match("^#") then
+      if rule:match("^[/~]") then
+        local folder = vim.fs.normalize(vim.fn.expand(rule))
+        if abs == folder or abs:sub(1, #folder + 1) == folder .. "/" then return ("never (%s)"):format(rule) end
+      elseif not rel then -- a file outside the PKB: only absolute rules apply
+      elseif rule:match("^#") then
         if idx.lines[rel] and has_tag(idx.lines[rel], rule) then return ("never (%s)"):format(rule) end
       elseif rule:match("/$") then
         if rel:sub(1, #rule) == rule then return ("never (%s)"):format(rule) end
-      elseif rel == rule or rel == rule .. ".md" or resolve(idx, rule, "") == rel then
+      elseif rel == rule or rel == rule .. ".md" or (resolve(idx, rule, "") or {}).rel == rel then
         return ("never (%s)"):format(rule)
       end
     end
-    local day = is_daily(rel)
+    local day = rel and is_daily(rel)
     if day and def.dates and not is_seed then
       if (def.dates.from and day < def.dates.from) or (def.dates.to and day > def.dates.to) then
         return "outside dates"
@@ -243,7 +305,7 @@ function M.plan(def_file, def_lines)
   end
 
   for _, seed in ipairs(def.seeds) do
-    local rel = resolve(idx, seed.link, plan.def_rel)
+    local rel = (resolve(idx, (seed.link:gsub("[|#].*$", "")), plan.def_rel) or {}).rel
     if not rel then
       table.insert(plan.errors, ("seed [[%s]] does not exist"):format(seed.link))
     else
@@ -251,7 +313,23 @@ function M.plan(def_file, def_lines)
     end
   end
 
-  local attachments, attachment_why = {}, {}
+  -- Files linked from exported pages. Files outside the PKB are copied to _external/<name>.
+  local attachments, attachment_why, attachment_src = {}, {}, {}
+  local external = {} -- absolute path -> its path in the copy
+  local function external_dest(abs)
+    if external[abs] then return external[abs] end
+    local base = vim.fs.basename(abs)
+    local stem, ext = base:match("^(.*)(%.[^.]+)$")
+    if not stem then stem, ext = base, "" end
+    local dest, n = "_external/" .. base, 1
+    while attachments[dest] do
+      n = n + 1
+      dest = ("_external/%s-%d%s"):format(stem, n, ext)
+    end
+    external[abs] = dest
+    return dest
+  end
+
   local head = 1
   while head <= #queue do
     local rel = queue[head]
@@ -259,18 +337,30 @@ function M.plan(def_file, def_lines)
     local left = budget[rel]
     for _, line in ipairs(idx.lines[rel] or {}) do
       for _, link in ipairs(links_in(line)) do
-        local target = resolve(idx, link.target, rel)
+        local target = resolve(idx, link.path, rel)
         if not target then
-          local name = trim(link.target:gsub("|.*$", ""))
-          if not name:match("^%a[%w+.-]*:") and not missing_seen[name] then
+          local name = trim(link.path)
+          if name ~= "" and not is_url(name) and not missing_seen[name] then
             missing_seen[name] = true
             table.insert(plan.missing, { link = name, from = rel })
           end
-        elseif target:match("%.md$") then
-          if left > 0 then visit(target, left - 1, rel) else skip(target, "beyond depth", rel) end
-        elseif not refused(target) and not attachments[target] then
-          attachments[target] = true
-          attachment_why[target] = rel
+        elseif target.abs then
+          local reason = refused(nil, false, target.abs)
+          if reason then
+            skip(target.abs, reason, rel)
+          elseif not external[target.abs] then
+            local dest = external_dest(target.abs)
+            attachments[dest], attachment_why[dest], attachment_src[dest] = true, rel, target.abs
+          end
+        elseif target.rel:match("%.md$") then
+          if left > 0 then visit(target.rel, left - 1, rel) else skip(target.rel, "beyond depth", rel) end
+        elseif not attachments[target.rel] then
+          local reason = refused(target.rel)
+          if reason then
+            skip(target.rel, reason, rel)
+          else
+            attachments[target.rel], attachment_why[target.rel] = true, rel
+          end
         end
       end
       for id in line:gmatch(task_id.PATTERN) do
@@ -285,24 +375,36 @@ function M.plan(def_file, def_lines)
   for _, rel in ipairs(order) do table.insert(plan.pages, { rel = rel, why = why[rel] }) end
   local files = vim.tbl_keys(attachments)
   table.sort(files)
-  for _, rel in ipairs(files) do table.insert(plan.files, { rel = rel, why = attachment_why[rel] }) end
+  for _, rel in ipairs(files) do
+    table.insert(plan.files, { rel = rel, why = attachment_why[rel], src = attachment_src[rel] })
+  end
+  plan.files_src = attachment_src
   local skipped_list = vim.tbl_values(skipped)
   table.sort(skipped_list, function(a, b) return a.rel < b.rel end)
   plan.skipped = skipped_list
 
-  -- Content of the copy: links to anything not exported become their text.
+  -- Content of the copy: links to anything not exported become their text; links written as absolute paths
+  -- (which would not work in the copy and show where your files are) are rewritten relative to the page.
   for _, rel in ipairs(order) do
     local out = {}
+    local dir = vim.fs.dirname(rel)
     for n, line in ipairs(idx.lines[rel]) do
       local links = links_in(line)
       for i = #links, 1, -1 do
         local link = links[i]
-        local target = resolve(idx, link.target, rel)
-        local kept = target and (budget[target] or attachments[target])
-        if not kept and not (link.kind == "md" and link.target:match("^%a[%w+.-]*:")) then
+        local target = resolve(idx, link.path, rel)
+        local new_path
+        if target and target.abs and external[target.abs] then
+          new_path = relative_to(dir, external[target.abs])
+        elseif target and target.rel and (budget[target.rel] or attachments[target.rel]) then
+          if target.absolute then new_path = relative_to(dir, target.rel) end
+        elseif link.kind == "md" and is_url(link.path) then
+          -- a web link: copied as is
+        else
           line = line:sub(1, link.s - 1) .. link.text .. line:sub(link.e + 1)
           table.insert(plan.unlinked, { rel = rel, line = n, text = link.text })
         end
+        if new_path then line = line:sub(1, link.s - 1) .. relink(link, new_path) .. line:sub(link.e + 1) end
       end
       out[n] = line
     end
@@ -368,7 +470,7 @@ function M.write(plan)
   for _, f in ipairs(plan.files) do
     local dest = out .. "/" .. f.rel
     vim.fn.mkdir(vim.fs.dirname(dest), "p")
-    local ok, err = vim.uv.fs_copyfile(plan.root .. "/" .. f.rel, dest)
+    local ok, err = vim.uv.fs_copyfile(f.src or (plan.root .. "/" .. f.rel), dest)
     if not ok then return false, "copying " .. f.rel .. " failed: " .. tostring(err) end
   end
   vim.fn.writefile({ "Written by pkb-nvim :PKBExport (" .. plan.name .. ")." }, out .. "/" .. M.MARKER)
@@ -400,7 +502,9 @@ function M.report_lines(plan)
   end
   if #plan.files > 0 then
     add("Files:")
-    for _, f in ipairs(plan.files) do add_rel(("  %s  ← %s"):format(f.rel, f.why), f.rel) end
+    for _, f in ipairs(plan.files) do
+      add_rel(("  %s  ← %s%s"):format(f.rel, f.why, f.src and ("  (" .. f.src .. ")") or ""), f.rel)
+    end
   end
   if #plan.skipped > 0 then
     add("Skipped:")
@@ -458,7 +562,8 @@ function M.run(buf)
     local rel = map[vim.api.nvim_win_get_cursor(0)[1]]
     if rel and plan.root then
       close()
-      vim.cmd.edit(vim.fn.fnameescape(plan.root .. "/" .. rel))
+      local path = rel:match("^/") and rel or (plan.files_src or {})[rel] or (plan.root .. "/" .. rel)
+      vim.cmd.edit(vim.fn.fnameescape(path))
     end
   end, vim.tbl_extend("force", o, { desc = "Open this page" }))
 end
