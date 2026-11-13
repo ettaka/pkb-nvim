@@ -31,7 +31,7 @@ local function trim(s) return (s:gsub("^%s+", ""):gsub("%s+$", "")) end
 
 --- Reads an export page. nil if it has no export:: line.
 function M.parse(lines)
-  local def = { seeds = {}, depth = 1, never = {}, forbidden = {} }
+  local def = { seeds = {}, depth = 1, never = {}, forbidden = {}, problems = {} }
   local section
   for _, line in ipairs(lines) do
     def.name = def.name or line:match("export::(%S.-)%s*$")
@@ -43,27 +43,46 @@ function M.parse(lines)
       if section == "seeds" and item then
         local link = item:match("^%[%[([^%]]+)%]%]")
         if link then
-          table.insert(def.seeds, { link = link, depth = tonumber(item:match("depth::(%d+)")) })
+          table.insert(def.seeds, { link = link, depth = tonumber(item:match("depth::%s*(%d+)")) })
         end
       elseif section == "never" and item and item ~= "" then
         table.insert(def.never, item:match("^%[%[([^%]|#]+).-%]%]$") or item)
       elseif section == "forbidden words" and item and item ~= "" then
         table.insert(def.forbidden, item)
       elseif section == "settings" then
-        local key, value = line:match("([%w_]+)::(%S+)")
-        if key == "depth" then
-          def.depth = tonumber(value) or def.depth
-        elseif key == "out" then
-          def.out = value
-        elseif key == "dates" then
-          local from, to = value:match("^(%d*%-?%d*%-?%d*)%.%.(%d*%-?%d*%-?%d*)$")
-          if from then def.dates = { from = from ~= "" and from or nil, to = to ~= "" and to or nil } end
-        end
+        M.parse_setting(def, (item or line))
       end
     end
   end
   if not def.name then return nil end
   return def
+end
+
+local DATE = "^%d%d%d%d%-%d%d%-%d%d$"
+
+--- One line of the Settings section, written by hand: "key::value", spaces allowed after ::. Values that
+--- cannot be read are collected in def.problems (shown as errors) instead of being ignored.
+function M.parse_setting(def, line)
+  local key, value = line:match("^%s*([%w_]+)::%s*(.-)%s*$")
+  if not key then return end
+  local function problem(msg) table.insert(def.problems, "Settings: " .. msg) end
+  if key == "depth" then
+    local n = value:match("^%d+$") and tonumber(value)
+    if n then def.depth = n else problem(("depth::%s not understood (a number)"):format(value)) end
+  elseif key == "out" then
+    def.out = value
+  elseif key == "dates" then
+    -- en/em dashes are multi-byte, so not in a [] set
+    local range = value:gsub("%s*–%s*", ".."):gsub("%s*—%s*", ".."):gsub("%s+%-%s+", "..")
+    local from, to = range:match("^(.-)%s*%.%.%s*(.-)$")
+    if from and (from == "" or from:match(DATE)) and (to == "" or to:match(DATE)) and (from ~= "" or to ~= "") then
+      def.dates = { from = from ~= "" and from or nil, to = to ~= "" and to or nil }
+    else
+      problem(("dates::%s not understood (use dates::2026-09-01..2026-11-30, open ends work)"):format(value))
+    end
+  elseif key ~= "export" then
+    problem(("unknown setting %s:: (known: depth, dates, out)"):format(key))
+  end
 end
 
 ---------------------------------------------------------------- the PKB
@@ -249,6 +268,8 @@ function M.plan(def_file, def_lines)
     return plan
   end
   plan.name = def.name
+  plan.depth, plan.dates = def.depth, def.dates
+  vim.list_extend(plan.errors, def.problems)
   plan.out = vim.fs.normalize(vim.fn.expand(def.out or ("~/pkb-export/" .. def.name:gsub("[^%w._-]+", "-"))))
   plan.def_rel = rel_path(root, def_file)
   if not plan.def_rel then
@@ -393,11 +414,13 @@ function M.plan(def_file, def_lines)
       for i = #links, 1, -1 do
         local link = links[i]
         local target = resolve(idx, link.path, rel)
+        -- [[wiki]] links are read from the PKB root (as Telekasten does), [text](path) from the page
+        local function from_here(p) return link.kind == "wiki" and p or relative_to(dir, p) end
         local new_path
         if target and target.abs and external[target.abs] then
-          new_path = relative_to(dir, external[target.abs])
+          new_path = from_here(external[target.abs])
         elseif target and target.rel and (budget[target.rel] or attachments[target.rel]) then
-          if target.absolute then new_path = relative_to(dir, target.rel) end
+          if target.absolute then new_path = from_here(target.rel) end
         elseif link.kind == "md" and is_url(link.path) then
           -- a web link: copied as is
         else
@@ -493,6 +516,11 @@ function M.report_lines(plan)
   local map = {}
   local function add_rel(s, rel) add(s); map[#lines] = rel end
   add(("EXPORT %s: %d pages, %d files → %s"):format(plan.name or "?", #plan.pages, #plan.files, plan.out or "?"))
+  local settings = ("depth %s"):format(plan.depth or "?")
+  if plan.dates then
+    settings = settings .. (", dates %s..%s"):format(plan.dates.from or "", plan.dates.to or "")
+  end
+  add(settings)
   add("[w] write  [<CR>] open page  [q] cancel")
   for _, e in ipairs(plan.errors) do add("ERROR: " .. e) end
   add("")

@@ -90,6 +90,46 @@ t.test("export page: open-ended date ranges", function()
   H.eq(P.parse({ "export::x", "## Settings", "dates::..2026-11-30" }).dates, { to = "2026-11-30" })
 end)
 
+-- Settings are written by hand: spaces after :: or around the range, and a dash between dates, all work.
+local date_forms = {
+  "dates::2026-09-01..2026-11-30",
+  "dates:: 2026-09-01..2026-11-30",
+  "dates::2026-09-01 .. 2026-11-30",
+  "dates:: 2026-09-01 – 2026-11-30",
+  "dates::2026-09-01—2026-11-30",
+  "- dates:: 2026-09-01..2026-11-30",
+}
+for _, line in ipairs(date_forms) do
+  t.test("export page: " .. line, function()
+    local def = require("pkb.export").parse({ "export::x", "## Settings", line })
+    H.eq(def.dates, { from = "2026-09-01", to = "2026-11-30" })
+    H.eq(def.problems, {})
+  end)
+end
+
+t.test("export page: spaces after :: in depth and out, and in a seed's depth", function()
+  local def = require("pkb.export").parse({ "export::x", "## Seeds", "- [[a]] depth:: 3", "## Settings", "depth:: 2",
+                                            "out:: ~/exports/my review" })
+  H.eq({ def.depth, def.out, def.seeds }, { 2, "~/exports/my review", { { link = "a", depth = 3 } } })
+end)
+
+t.test("export page: a setting that cannot be read is an error, not silently ignored", function()
+  local _, def_file = make_pkb({ "export::x", "## Seeds", "- [[other]]", "## Settings", "dates::last autumn",
+                                 "depth::deep", "colour::blue" })
+  local plan = plan_for(def_file)
+  H.eq(plan.errors, {
+    "Settings: dates::last autumn not understood (use dates::2026-09-01..2026-11-30, open ends work)",
+    "Settings: depth::deep not understood (a number)",
+    "Settings: unknown setting colour:: (known: depth, dates, out)",
+  })
+end)
+
+t.test("export page: the report shows the settings in use", function()
+  local _, def_file = make_pkb()
+  local report = require("pkb.export").report_lines(plan_for(def_file))
+  H.eq(report[2], "depth 1, dates 2026-09-01..2026-11-30")
+end)
+
 t.test("a page without export:: is not an export page", function()
   H.eq(require("pkb.export").parse({ "# notes", "## Seeds", "- [[a]]" }), nil)
 end)
@@ -203,6 +243,7 @@ local function file_links_pkb(extra_never)
     "page-relative [l](local.pdf)",
     "wiki absolute [[" .. root .. "/papers/qc.pdf]]",
     "wiki never [[" .. ext .. "/private/salary.pdf]]",
+    "wiki outside [[" .. ext .. "/docs/report final.pdf|the report]]",
   })
   local out = root .. "-out"
   H.defer(function() vim.fn.delete(out, "rf") end)
@@ -229,8 +270,9 @@ t.test("file links: absolute paths are rewritten relative to the page; no home p
     "angle brackets ![r2](<../_external/report final-2.pdf>)",
     "never s",
     "page-relative [l](local.pdf)",
-    "wiki absolute [[../papers/qc.pdf]]",
+    "wiki absolute [[papers/qc.pdf]]",
     "wiki never salary.pdf",
+    "wiki outside [[_external/report final.pdf|the report]]",
   })
   local all = table.concat(a, "\n")
   H.ok(not all:find(root, 1, true) and not all:find(ext, 1, true), all)
@@ -325,6 +367,7 @@ t.test(":PKBExport shows a report; w writes the repo, q cancels", function()
   vim.cmd("PKBExport")
   local report = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
   H.has(report, "EXPORT review: 5 pages, 2 files")
+  H.has(report, "depth 1, dates 2026-09-01..2026-11-30")
   H.has(report, "projects/a.md")
   H.has(report, "secret.md  never (#private)")
   H.has(report, "the plan")

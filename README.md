@@ -23,6 +23,19 @@ with the cursor on that day; a day without tasks gets an empty section.
 `H`/`S` also work), under a `Times in UTC-06:00` header; the notes are not changed. It combines with a date:
 `:PKBInbox 2026-11-12 tz=-06:00` (the date is then that offset's day). From Lua: `notifier.inbox({ tz = "-06:00" })`.
 
+## Following file links
+
+`require("pkb.links").follow()` opens the link under the cursor when it is a file link: `[text](path)` relative
+to the note, from the PKB root (`/papers/x.pdf`) or absolute, and `[[./path]]` / `[[../path]]`. Markdown files
+open in Neovim, others (PDFs, images) with the system opener. It returns `false` for anything else (URLs,
+`[[page]]` links, no link), so a mapping can fall back to Telekasten:
+
+```lua
+vim.keymap.set("n", "<leader>zz", function()
+  if not require("pkb.links").follow() then vim.cmd("Telekasten follow_link") end
+end)
+```
+
 ## Recurrence
 
 `recur::<rule>` repeats a task; completing or skipping it writes the next instance below it.
@@ -83,9 +96,11 @@ out::~/pkb-export/security-review
   to the page with that `task::` tag. Images and other files linked from exported pages are copied too.
 - File links may be relative to the page, start from the PKB root (`/papers/x.pdf`), or be absolute
   (`/home/me/pkb/papers/x.pdf`, `~/Documents/x.pdf`; `%20` and `<path with spaces>` work). Files outside the PKB
-  are copied to `_external/`, and absolute links are rewritten relative to the page, so the copy contains no
-  paths from your machine.
-- **dates** limits daily notes (`YYYY-MM-DD.md`) reached by links; open ends work (`2026-09-01..`).
+  are copied to `_external/`, and absolute links are rewritten (`[text](path)` relative to the page,
+  `[[path]]` from the PKB root, as Telekasten reads them), so the copy contains no paths from your machine.
+- **dates** limits daily notes (`YYYY-MM-DD.md`) reached by links; open ends work (`2026-09-01..`), and so do
+  spaces and dashes (`dates:: 2026-09-01 – 2026-11-30`). A setting that cannot be read is shown as an error in
+  the report, and the report's second line shows the depth and dates in use.
 - **Never** (folders, pages, `#tags`, and absolute folders such as `~/Documents/private/`) is never exported, and links into it are not followed. The export page
   itself is never exported.
 - In the copy, links to pages that are not exported become plain text. Nothing else is changed (tags stay).
