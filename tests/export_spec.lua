@@ -176,6 +176,33 @@ t.test("selection: depth::0 seed exports only the seed", function()
   H.eq(rels(plan_for(def_file).pages), { "projects/a.md" })
 end)
 
+t.test("selection: dates without seeds exports the daily notes in the range and what they link to", function()
+  local _, def_file = make_pkb({ "export::x", "## Settings", "dates::2026-09-01..2026-11-30" })
+  local plan = plan_for(def_file)
+  H.eq(plan.errors, {})
+  H.eq(vim.tbl_map(function(p) return p.rel .. " " .. p.why end, plan.pages),
+    { "2026-10-02.md date range", "projects/a.md 2026-10-02.md" })
+end)
+
+t.test("selection: dates and seeds together export both; Never still applies to daily notes in the range", function()
+  local root, def_file = make_pkb({ "export::x", "## Seeds", "- [[other]] depth::0", "## Settings",
+                                    "dates::2026-10-01..2026-10-31", "depth::0", "## Never", "- #private" })
+  H.write(root .. "/2026-10-05.md", { "# 2026-10-05 #private" })
+  local plan = plan_for(def_file)
+  H.eq(rels(plan.pages), { "2026-10-02.md", "other.md" })
+  H.eq(vim.tbl_map(function(s) return s.rel .. " " .. s.reason end, plan.skipped), { "2026-10-05.md never (#private)", "projects/a.md beyond depth" })
+end)
+
+t.test("selection: open-ended dates select from that day on", function()
+  local _, def_file = make_pkb({ "export::x", "## Settings", "dates::2026-12-01..", "depth::0" })
+  H.eq(rels(plan_for(def_file).pages), { "2026-12-24.md" })
+end)
+
+t.test("selection: no seeds and no dates is an error", function()
+  local _, def_file = make_pkb({ "export::x" })
+  H.eq(plan_for(def_file).errors, { "nothing to export: add seeds under ## Seeds or a dates:: range" })
+end)
+
 t.test("selection: a seed that does not exist is an error", function()
   local _, def_file = make_pkb({ "export::x", "## Seeds", "- [[ghost]]" })
   local plan = plan_for(def_file)
@@ -326,6 +353,8 @@ t.test("write: running again rebuilds from scratch (no stale pages, still one co
   local lines = read(def_file)
   lines[5] = "- [[other]] depth::0"
   lines[6] = ""
+  assert(lines[10]:match("^dates::"))
+  lines[10] = "" -- no date range: a date range would select daily notes too
   H.write(def_file, lines)
   local ok, msg = E.write(plan_for(def_file))
   H.eq(ok, true, msg)

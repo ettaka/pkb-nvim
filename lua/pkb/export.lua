@@ -8,7 +8,8 @@
 --   - [[projects/kqc]] depth::2        start pages; depth:: (optional) overrides the default for this one
 --   ## Settings
 --   depth::1                           follow links this many steps from each seed (default 1)
---   dates::2026-09-01..2026-11-30      daily notes (YYYY-MM-DD.md) reached by links must be in this range
+--   dates::2026-09-01..2026-11-30      daily notes (YYYY-MM-DD.md) in this range are exported like seeds, and
+--                                      daily notes reached by links must be in it
 --   out::~/pkb-export/review           default ~/pkb-export/<name>
 --   ## Never
 --   - people/                          folder, [[page]] or #tag: never exported, links into it not followed
@@ -312,13 +313,13 @@ function M.plan(def_file, def_lines)
       skipped[rel] = { rel = rel, reason = reason, from = from }
     end
   end
-  local function visit(rel, left, from, is_seed)
+  local function visit(rel, left, from, is_seed, label)
     if budget[rel] and budget[rel] >= left then return end
     local reason = refused(rel, is_seed)
     if reason then return skip(rel, reason, from) end
     if not budget[rel] then
       table.insert(order, rel)
-      why[rel] = from and from or "seed"
+      why[rel] = from or label or "seed"
     end
     skipped[rel] = nil
     budget[rel] = left
@@ -332,6 +333,19 @@ function M.plan(def_file, def_lines)
     else
       visit(rel, seed.depth or def.depth, nil, true)
     end
+  end
+
+  -- A date range also selects: every daily note in it is a starting point, like a seed (Never still applies).
+  if def.dates then
+    for _, rel in ipairs(list_files(root)) do
+      local day = is_daily(rel)
+      if day and not (def.dates.from and day < def.dates.from) and not (def.dates.to and day > def.dates.to) then
+        visit(rel, def.depth, nil, true, "date range")
+      end
+    end
+  end
+  if #def.seeds == 0 and not def.dates and #def.problems == 0 then
+    table.insert(plan.errors, "nothing to export: add seeds under ## Seeds or a dates:: range")
   end
 
   -- Files linked from exported pages. Files outside the PKB are copied to _external/<name>.
