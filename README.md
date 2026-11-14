@@ -76,6 +76,7 @@ export::security-review
 ## Seeds
 - [[projects/kqc-simulations]]
 - [[howto/ssh-setup]] depth::2
+- dates::2026-10-01..2026-10-31 depth::0
 
 ## Settings
 depth::1
@@ -98,9 +99,9 @@ out::~/pkb-export/security-review
   (`/home/me/pkb/papers/x.pdf`, `~/Documents/x.pdf`; `%20` and `<path with spaces>` work). Files outside the PKB
   are copied to `_external/`, and absolute links are rewritten (`[text](path)` relative to the page,
   `[[path]]` from the PKB root, as Telekasten reads them), so the copy contains no paths from your machine.
-- **dates** selects too: every daily note (`YYYY-MM-DD.md`) in the range is exported like a seed (its links are
-  followed up to `depth`; Never still applies), and daily notes reached by links must be in the range. With no
-  seeds, the date range alone decides. Open ends work (`2026-09-01..`), and so do
+- **dates** under Settings is a filter: daily notes (`YYYY-MM-DD.md`) reached by links must be in the range.
+  Under Seeds, `- dates::2026-09-01..2026-11-30` (optionally with `depth::`) is a seed: every daily note in the
+  range is exported and its links are followed (Never still applies). Open ends work (`2026-09-01..`), and so do
   spaces and dashes (`dates:: 2026-09-01 – 2026-11-30`). A setting that cannot be read is shown as an error in
   the report, and the report's second line shows the depth and dates in use.
 - **Never** (folders, pages, `#tags`, and absolute folders such as `~/Documents/private/`) is never exported, and links into it are not followed. The export page

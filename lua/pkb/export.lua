@@ -6,10 +6,10 @@
 --   export::security-review
 --   ## Seeds
 --   - [[projects/kqc]] depth::2        start pages; depth:: (optional) overrides the default for this one
+--   - dates::2026-10-01..2026-10-31    every daily note (YYYY-MM-DD.md) in the range is a start page
 --   ## Settings
 --   depth::1                           follow links this many steps from each seed (default 1)
---   dates::2026-09-01..2026-11-30      daily notes (YYYY-MM-DD.md) in this range are exported like seeds, and
---                                      daily notes reached by links must be in it
+--   dates::2026-09-01..2026-11-30      filter: daily notes reached by links must be in this range
 --   out::~/pkb-export/review           default ~/pkb-export/<name>
 --   ## Never
 --   - people/                          folder, [[page]] or #tag: never exported, links into it not followed
@@ -43,8 +43,18 @@ function M.parse(lines)
       local item = line:match("^%s*[-*+]%s+(.-)%s*$")
       if section == "seeds" and item then
         local link = item:match("^%[%[([^%]]+)%]%]")
+        local depth = tonumber(item:match("depth::%s*(%d+)"))
         if link then
-          table.insert(def.seeds, { link = link, depth = tonumber(item:match("depth::%s*(%d+)")) })
+          table.insert(def.seeds, { link = link, depth = depth })
+        elseif item:match("^dates::") then
+          -- a date seed: every daily note in the range is a starting point
+          local value = trim((item:gsub("%s*depth::%s*%d+", ""):match("^dates::(.*)$")))
+          local range = M.parse_range(value)
+          if range then
+            table.insert(def.seeds, { dates = range, depth = depth })
+          else
+            table.insert(def.problems, ("Seeds: dates::%s not understood (%s)"):format(value, M.RANGE_HELP))
+          end
         end
       elseif section == "never" and item and item ~= "" then
         table.insert(def.never, item:match("^%[%[([^%]|#]+).-%]%]$") or item)
@@ -60,6 +70,17 @@ function M.parse(lines)
 end
 
 local DATE = "^%d%d%d%d%-%d%d%-%d%d$"
+M.RANGE_HELP = "use dates::2026-09-01..2026-11-30, open ends work"
+
+--- "2026-09-01..2026-11-30" (spaces, en/em dashes and open ends allowed) -> { from, to }, or nil.
+function M.parse_range(value)
+  -- en/em dashes are multi-byte, so not in a [] set
+  local range = value:gsub("%s*–%s*", ".."):gsub("%s*—%s*", ".."):gsub("%s+%-%s+", "..")
+  local from, to = range:match("^(.-)%s*%.%.%s*(.-)$")
+  if from and (from == "" or from:match(DATE)) and (to == "" or to:match(DATE)) and (from ~= "" or to ~= "") then
+    return { from = from ~= "" and from or nil, to = to ~= "" and to or nil }
+  end
+end
 
 --- One line of the Settings section, written by hand: "key::value", spaces allowed after ::. Values that
 --- cannot be read are collected in def.problems (shown as errors) instead of being ignored.
@@ -73,14 +94,8 @@ function M.parse_setting(def, line)
   elseif key == "out" then
     def.out = value
   elseif key == "dates" then
-    -- en/em dashes are multi-byte, so not in a [] set
-    local range = value:gsub("%s*–%s*", ".."):gsub("%s*—%s*", ".."):gsub("%s+%-%s+", "..")
-    local from, to = range:match("^(.-)%s*%.%.%s*(.-)$")
-    if from and (from == "" or from:match(DATE)) and (to == "" or to:match(DATE)) and (from ~= "" or to ~= "") then
-      def.dates = { from = from ~= "" and from or nil, to = to ~= "" and to or nil }
-    else
-      problem(("dates::%s not understood (use dates::2026-09-01..2026-11-30, open ends work)"):format(value))
-    end
+    def.dates = M.parse_range(value)
+    if not def.dates then problem(("dates::%s not understood (%s)"):format(value, M.RANGE_HELP)) end
   elseif key ~= "export" then
     problem(("unknown setting %s:: (known: depth, dates, out)"):format(key))
   end
@@ -327,25 +342,26 @@ function M.plan(def_file, def_lines)
   end
 
   for _, seed in ipairs(def.seeds) do
-    local rel = (resolve(idx, (seed.link:gsub("[|#].*$", "")), plan.def_rel) or {}).rel
-    if not rel then
-      table.insert(plan.errors, ("seed [[%s]] does not exist"):format(seed.link))
+    if seed.dates then
+      -- a date seed: every daily note in the range is a starting point (Never still applies)
+      local label = ("dates::%s..%s"):format(seed.dates.from or "", seed.dates.to or "")
+      for _, rel in ipairs(list_files(root)) do
+        local day = is_daily(rel)
+        if day and not (seed.dates.from and day < seed.dates.from) and not (seed.dates.to and day > seed.dates.to) then
+          visit(rel, seed.depth or def.depth, nil, true, label)
+        end
+      end
     else
-      visit(rel, seed.depth or def.depth, nil, true)
-    end
-  end
-
-  -- A date range also selects: every daily note in it is a starting point, like a seed (Never still applies).
-  if def.dates then
-    for _, rel in ipairs(list_files(root)) do
-      local day = is_daily(rel)
-      if day and not (def.dates.from and day < def.dates.from) and not (def.dates.to and day > def.dates.to) then
-        visit(rel, def.depth, nil, true, "date range")
+      local rel = (resolve(idx, (seed.link:gsub("[|#].*$", "")), plan.def_rel) or {}).rel
+      if not rel then
+        table.insert(plan.errors, ("seed [[%s]] does not exist"):format(seed.link))
+      else
+        visit(rel, seed.depth or def.depth, nil, true)
       end
     end
   end
-  if #def.seeds == 0 and not def.dates and #def.problems == 0 then
-    table.insert(plan.errors, "nothing to export: add seeds under ## Seeds or a dates:: range")
+  if #def.seeds == 0 and #def.problems == 0 then
+    table.insert(plan.errors, "nothing to export: add seeds under ## Seeds ([[page]] or dates::from..to)")
   end
 
   -- Files linked from exported pages. Files outside the PKB are copied to _external/<name>.
@@ -602,7 +618,7 @@ function M.run(buf)
   end, vim.tbl_extend("force", o, { desc = "Write the export repo" }))
   vim.keymap.set("n", "<CR>", function()
     local rel = map[vim.api.nvim_win_get_cursor(0)[1]]
-    if rel and plan.root then
+    if rel and plan.root and not rel:match("^export::") then
       close()
       local path = rel:match("^/") and rel or (plan.files_src or {})[rel] or (plan.root .. "/" .. rel)
       vim.cmd.edit(vim.fn.fnameescape(path))
