@@ -390,6 +390,133 @@ t.test("write: out defaults to ~/pkb-export/<name>", function()
   H.eq(plan_for(def_file).out, vim.fn.expand("~/pkb-export/my-review"))
 end)
 
+---------------------------------------------------------------- round trip: export, travel, import with git pull
+-- The export is recorded in the full PKB's history (a merge that changes no files), so the import is a plain
+-- `git pull` from the travel copy: git merges each file three ways (as exported / at home / after travel).
+local function git_ok(dir, ...)
+  local res = vim.system({ "git", "-C", dir, ... }, { text = true }):wait()
+  return res.code == 0, vim.trim((res.stdout or "") .. (res.stderr or ""))
+end
+
+local function git_pkb(def)
+  with_identity()
+  local root, def_file, out = make_pkb(def)
+  -- b.md at home has a link that the export turns into text (line 2)
+  H.write(root .. "/b.md", { "# B", "Next: [[c#Details]]", "", "## Notes", "- first" })
+  git_ok(root, "init", "-q")
+  git_ok(root, "add", "-A")
+  git_ok(root, "commit", "-q", "-m", "full PKB")
+  return root, def_file, out
+end
+
+local function travel(out)
+  local dir = out .. "-travel"
+  H.defer(function() vim.fn.delete(dir, "rf") end)
+  assert(git_ok(vim.fs.dirname(out), "clone", "-q", out, dir))
+  return dir
+end
+
+t.test("export records itself in the full PKB's history without changing any file", function()
+  local root, def_file, out = git_pkb()
+  local ok, msg = require("pkb.export").write(plan_for(def_file))
+  H.eq(ok, true, msg)
+  H.has(msg, "pull <copy>")
+  H.eq(git(root, "rev-list", "--count", "HEAD"), "3", "full commit + export commit + recording merge")
+  H.eq(git(root, "rev-parse", "HEAD^2"), git(out, "rev-parse", "HEAD"))
+  H.eq(git(root, "diff", "--stat", "HEAD^1", "HEAD"), "", "no file changed")
+  H.eq(git(root, "status", "--porcelain"), "")
+end)
+
+t.test("import: git pull brings travel changes home; untouched lines keep the full version and its links", function()
+  local root, def_file, out = git_pkb()
+  assert(require("pkb.export").write(plan_for(def_file)))
+  local tr = travel(out)
+  -- while travelling: add a line to b.md (its link line was exported as text), a new page, a new daily note
+  H.write(tr .. "/b.md", { "# B", "Next: c#Details", "", "## Notes", "- first", "- added while travelling" })
+  H.write(tr .. "/trip.md", { "# Trip", "see [[b]]" })
+  git_ok(tr, "add", "-A")
+  git_ok(tr, "commit", "-q", "-m", "travel notes")
+  -- meanwhile at home: another page changes
+  H.write(root .. "/other.md", { "# Unrelated", "changed at home" })
+  git_ok(root, "commit", "-qam", "home change")
+
+  local ok, out_msg = git_ok(root, "pull", "-q", "--no-rebase", "--no-edit", tr)
+  H.eq(ok, true, out_msg)
+  H.eq(read(root .. "/b.md"), { "# B", "Next: [[c#Details]]", "", "## Notes", "- first", "- added while travelling" },
+    "link kept")
+  H.eq(read(root .. "/trip.md"), { "# Trip", "see [[b]]" })
+  H.eq(read(root .. "/other.md"), { "# Unrelated", "changed at home" })
+  H.eq(read(root .. "/secret.md"), { "# Secret #private", "hunter2" }, "unexported pages untouched")
+  H.eq(vim.fn.filereadable(root .. "/" .. require("pkb.export").MARKER), 0, "export marker not imported")
+  H.eq(vim.fn.isdirectory(root .. "/_external"), 0)
+end)
+
+t.test("import: importing again from the same copy brings only the new notes", function()
+  local root, def_file, out = git_pkb()
+  assert(require("pkb.export").write(plan_for(def_file)))
+  local tr = travel(out)
+  H.write(tr .. "/trip.md", { "# Trip", "day 1" })
+  git_ok(tr, "add", "-A")
+  git_ok(tr, "commit", "-q", "-m", "day 1")
+  assert(git_ok(root, "pull", "-q", "--no-rebase", "--no-edit", tr))
+  H.write(root .. "/trip.md", { "# Trip", "day 1", "home: sorted the photos" })
+  git_ok(root, "commit", "-qam", "home edit of an imported page")
+  H.write(tr .. "/day2.md", { "# Day 2" })
+  git_ok(tr, "add", "-A")
+  git_ok(tr, "commit", "-q", "-m", "day 2")
+  local ok, msg = git_ok(root, "pull", "-q", "--no-rebase", "--no-edit", tr)
+  H.eq(ok, true, msg)
+  H.eq(read(root .. "/day2.md"), { "# Day 2" })
+  H.eq(read(root .. "/trip.md"), { "# Trip", "day 1", "home: sorted the photos" }, "home edit kept, day 1 not re-applied")
+end)
+
+t.test("import: a line edited while travelling that the export had changed is a git conflict", function()
+  local root, def_file, out = git_pkb()
+  assert(require("pkb.export").write(plan_for(def_file)))
+  local tr = travel(out)
+  H.write(tr .. "/b.md", { "# B", "Next: c#Details and more", "", "## Notes", "- first" })
+  git_ok(tr, "commit", "-qam", "edit the unlinked line")
+  local ok = git_ok(root, "pull", "-q", "--no-rebase", "--no-edit", tr)
+  H.eq(ok, false, "conflict")
+  H.has(table.concat(read(root .. "/b.md"), "\n"), "<<<<<<<")
+  H.has(git(root, "status", "--porcelain"), "UU b.md")
+end)
+
+t.test("export: refuses when the full PKB has staged changes or a merge in progress", function()
+  local root, def_file, out = git_pkb()
+  H.write(root .. "/other.md", { "staged" })
+  git_ok(root, "add", "other.md")
+  local ok, err = require("pkb.export").write(plan_for(def_file))
+  H.eq(ok, false)
+  H.has(err, "staged")
+  H.eq(vim.fn.isdirectory(out), 0, "nothing written")
+end)
+
+t.test("export: without git in the PKB the copy is still written; the message says import needs git", function()
+  with_identity()
+  local _, def_file = make_pkb()
+  local ok, msg = require("pkb.export").write(plan_for(def_file))
+  H.eq(ok, true, msg)
+  H.has(msg, "not a git repo")
+end)
+
+t.test("re-export: refused while the export folder has commits not yet in the full PKB", function()
+  local root, def_file, out = git_pkb()
+  local E = require("pkb.export")
+  assert(E.write(plan_for(def_file)))
+  H.write(out .. "/new.md", { "written in the export folder" })
+  git_ok(out, "add", "-A")
+  git_ok(out, "commit", "-q", "-m", "not imported")
+  local ok, err = E.write(plan_for(def_file))
+  H.eq(ok, false)
+  H.has(err, "not yet imported")
+  H.eq(read(out .. "/new.md"), { "written in the export folder" }, "kept")
+  -- after importing, re-exporting works
+  assert(git_ok(root, "pull", "-q", "--no-rebase", "--no-edit", out))
+  local ok2, msg2 = E.write(plan_for(def_file))
+  H.eq(ok2, true, msg2)
+end)
+
 ---------------------------------------------------------------- :PKBExport
 t.test(":PKBExport on a page without export:: warns", function()
   local root = H.tmpdir()

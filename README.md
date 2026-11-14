@@ -113,6 +113,33 @@ out::~/pkb-export/security-review
 `w` writes, `<CR>` opens a page, `q` cancels. `out` (default `~/pkb-export/<name>`) is rebuilt from scratch on
 every export; a folder that is not an earlier export is never overwritten.
 
+### Taking an export with you and importing the notes back
+
+When the PKB is a git repo, `:PKBExport` also records the export in its history: a merge that changes no
+files (`git merge -s ours`). The exported commit becomes the common base, so notes taken in a copy of the
+export come back with a plain `git pull`, and git merges each file three ways (as exported / at home / after
+travel):
+
+```sh
+# home: back up, then export (open the export page, :PKBExport, w)
+git -C ~/pkb push backup
+# travel device: a clone of the export is its PKB
+git clone ssh://home/~/pkb-export/travel ~/pkb      # PKB_ROOT=~/pkb there; commit notes as usual
+# home, after the trip
+git -C ~/pkb pull ssh://travel/~/pkb                 # resolve conflicts with git, then commit
+```
+
+- Lines changed only while travelling come home; every other line keeps the full version (links that the
+  export turned into text stay links). New pages are added; pages deleted while travelling are deleted at
+  home, as in any git merge, so check `git diff` before committing.
+- A line changed while travelling that differs between home and the export (changed at home meanwhile, or a
+  link the export turned into text) is a git conflict. So is a change right next to such a line: git
+  treats touching changes as one.
+- `_external/` copies and the `.pkb-export` marker stay out of the PKB. Importing again from the same copy
+  brings only what is new.
+- The export refuses while the PKB has staged changes or a merge in progress, and a later export to the same
+  folder refuses while it has commits that are not yet in the PKB (import them first).
+
 ## Tests
 
 ```sh

@@ -499,17 +499,46 @@ end
 --- Writes the plan as a fresh git repo at plan.out (replacing an earlier export there).
 --- @return boolean ok
 --- @return string message
+--- Whether the PKB root is the top of a git repo (so an export can be recorded in its history), and why not.
+local function pkb_repo(root)
+  local top = run({ "git", "rev-parse", "--show-toplevel" }, root)
+  if not top then return false, "the PKB is not a git repo" end
+  if vim.uv.fs_realpath(top) ~= vim.uv.fs_realpath(root) then
+    return false, "the PKB is a folder inside the git repo " .. top .. " (its paths would not match the export's)"
+  end
+  return true
+end
+
 function M.write(plan)
   if #plan.errors > 0 then return false, "export has errors: " .. table.concat(plan.errors, "; ") end
   if #plan.forbidden > 0 then
     return false, ("forbidden words in the copy (%d), nothing written"):format(#plan.forbidden)
   end
-  local out = plan.out
+  local root, out = plan.root, plan.out
+  local recordable, why_not = pkb_repo(root)
+  if recordable then
+    if not run({ "git", "diff", "--cached", "--quiet" }, root) then
+      return false, "the PKB has staged changes; commit or unstage them first (the export is recorded with a merge)"
+    end
+    if run({ "git", "rev-parse", "-q", "--verify", "MERGE_HEAD" }, root) then
+      return false, "the PKB has a merge in progress; finish it first"
+    end
+  end
+
   if vim.uv.fs_stat(out) then
     local is_export = vim.uv.fs_stat(out .. "/" .. M.MARKER) ~= nil
     local empty = vim.fn.empty(vim.fn.readdir(out)) == 1
     if not is_export and not empty then
       return false, out .. " exists and is not an earlier export; choose another out:: or remove it"
+    end
+    -- An earlier export with commits on top (notes taken in it, or pulled into it) must be imported before it
+    -- is rebuilt, or those notes would be lost.
+    if is_export and vim.uv.fs_stat(out .. "/.git") and (run({ "git", "rev-list", "--count", "HEAD" }, out) or "1") ~= "1" then
+      local head = run({ "git", "rev-parse", "HEAD" }, out)
+      if not (recordable and head and run({ "git", "merge-base", "--is-ancestor", head, "HEAD" }, root)) then
+        return false, ("%s has commits not yet imported into the PKB; import them first (git -C %s pull %s) or move it away")
+          :format(out, root, out)
+      end
     end
     if is_export then vim.fn.delete(out, "rf") end
   end
@@ -536,7 +565,27 @@ function M.write(plan)
     local _, err = run(cmd, out)
     if err then return false, ("%s failed in %s: %s"):format(table.concat(cmd, " "), out, err) end
   end
-  return true, ("exported %d pages and %d files to %s (one commit)"):format(#plan.pages, #plan.files, out)
+  local done = ("exported %d pages and %d files to %s (one commit)"):format(#plan.pages, #plan.files, out)
+  if not recordable then
+    return true, done .. "; not recorded for import: " .. why_not .. ", so a later git pull has no common base"
+  end
+
+  -- Record the export in the PKB's history: a merge that keeps every file as it is (-s ours). The export
+  -- commit becomes the common base, so a later `git pull` of the travel copy merges each file three ways
+  -- (as exported / at home / after travel) and conflicts are ordinary git conflicts.
+  local head = run({ "git", "rev-parse", "HEAD" }, out)
+  for _, cmd in ipairs({
+    { "git", "fetch", "-q", out, "HEAD" },
+    { "git", "merge", "-q", "-s", "ours", "--allow-unrelated-histories", "--no-edit",
+      "-m", "PKB export " .. plan.name .. ": record the exported copy (no files changed)", head },
+  }) do
+    local _, err = run(cmd, root)
+    if err then
+      return false, ("%s; but recording it in the PKB failed (%s): %s"):format(done, table.concat(cmd, " "), err)
+    end
+  end
+  return true, ("%s; recorded in the PKB's history. To import notes taken in a copy of it: git -C %s pull <copy>")
+    :format(done, root)
 end
 
 ---------------------------------------------------------------- report
