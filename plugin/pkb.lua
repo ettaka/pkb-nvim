@@ -37,3 +37,8 @@ end, {})
 vim.api.nvim_create_user_command("PKBExport", function()
   require("pkb.export").run()
 end, { desc = "Export the pages selected by this export page (export::<name>) to a fresh git repo" })
+
+vim.api.nvim_create_user_command("PKBImport", function(args)
+  require("pkb.export").import_command(args.args)
+end, { nargs = "?", complete = "dir",
+       desc = "Import notes taken in a copy of this export (default: the export folder) as one commit" })

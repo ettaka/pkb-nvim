@@ -272,9 +272,23 @@ end
 --- @return table plan { name, out, def_rel, pages = {{rel, why}}, files = {{rel, why}}, skipped = {{rel, reason, from}},
 ---   missing = {{link, from}}, unlinked = {{rel, line, text}}, forbidden = {{rel, line, word}}, errors = {string},
 ---   content = { [rel] = lines } }
-function M.plan(def_file, def_lines)
+local function pkb_root()
   local root = vim.fs.normalize(require("pkb.notifier").PKB_ROOT or vim.env.PKB_ROOT or "~/pkb")
-  root = vim.fs.normalize(vim.fn.fnamemodify(vim.fn.expand(root), ":p")):gsub("/$", "")
+  return (vim.fs.normalize(vim.fn.fnamemodify(vim.fn.expand(root), ":p")):gsub("/$", ""))
+end
+
+local function slug(name) return (name:gsub("[^%w._-]+", "-"):gsub("%.%.+", "-"):gsub("^[.-]+", "")) end
+
+--- Default folder of an export.
+local function default_out(def)
+  return vim.fs.normalize(vim.fn.expand(def.out or ("~/pkb-export/" .. slug(def.name))))
+end
+
+--- The ref in the PKB repo that keeps the exported (later: last imported) commit of an export.
+function M.ref(name) return "refs/pkb-export/" .. slug(name) end
+
+function M.plan(def_file, def_lines)
+  local root = pkb_root()
   def_file = vim.fs.normalize(vim.fn.fnamemodify(def_file, ":p"))
   local def = M.parse(def_lines or read_file(def_file))
   local plan = { pages = {}, files = {}, skipped = {}, missing = {}, unlinked = {}, forbidden = {}, errors = {},
@@ -286,7 +300,7 @@ function M.plan(def_file, def_lines)
   plan.name = def.name
   plan.depth, plan.dates = def.depth, def.dates
   vim.list_extend(plan.errors, def.problems)
-  plan.out = vim.fs.normalize(vim.fn.expand(def.out or ("~/pkb-export/" .. def.name:gsub("[^%w._-]+", "-"))))
+  plan.out = default_out(def)
   plan.def_rel = rel_path(root, def_file)
   if not plan.def_rel then
     table.insert(plan.errors, ("the export page is not inside the PKB (%s)"):format(root))
@@ -516,14 +530,7 @@ function M.write(plan)
   end
   local root, out = plan.root, plan.out
   local recordable, why_not = pkb_repo(root)
-  if recordable then
-    if not run({ "git", "diff", "--cached", "--quiet" }, root) then
-      return false, "the PKB has staged changes; commit or unstage them first (the export is recorded with a merge)"
-    end
-    if run({ "git", "rev-parse", "-q", "--verify", "MERGE_HEAD" }, root) then
-      return false, "the PKB has a merge in progress; finish it first"
-    end
-  end
+  local ref = M.ref(plan.name)
 
   if vim.uv.fs_stat(out) then
     local is_export = vim.uv.fs_stat(out .. "/" .. M.MARKER) ~= nil
@@ -535,9 +542,9 @@ function M.write(plan)
     -- is rebuilt, or those notes would be lost.
     if is_export and vim.uv.fs_stat(out .. "/.git") and (run({ "git", "rev-list", "--count", "HEAD" }, out) or "1") ~= "1" then
       local head = run({ "git", "rev-parse", "HEAD" }, out)
-      if not (recordable and head and run({ "git", "merge-base", "--is-ancestor", head, "HEAD" }, root)) then
-        return false, ("%s has commits not yet imported into the PKB; import them first (git -C %s pull %s) or move it away")
-          :format(out, root, out)
+      if not (recordable and head and run({ "git", "merge-base", "--is-ancestor", head, ref }, root)) then
+        return false, ("%s has commits not yet imported into the PKB; import them first (:PKBImport on the export page) or move it away")
+          :format(out)
       end
     end
     if is_export then vim.fn.delete(out, "rf") end
@@ -570,22 +577,71 @@ function M.write(plan)
     return true, done .. "; not recorded for import: " .. why_not .. ", so a later git pull has no common base"
   end
 
-  -- Record the export in the PKB's history: a merge that keeps every file as it is (-s ours). The export
-  -- commit becomes the common base, so a later `git pull` of the travel copy merges each file three ways
-  -- (as exported / at home / after travel) and conflicts are ordinary git conflicts.
-  local head = run({ "git", "rev-parse", "HEAD" }, out)
+  -- Keep the exported commit in the PKB repo as a private ref (not in its history; a normal git push does not
+  -- send it). :PKBImport merges a copy of the export three ways against it.
   for _, cmd in ipairs({
     { "git", "fetch", "-q", out, "HEAD" },
-    { "git", "merge", "-q", "-s", "ours", "--allow-unrelated-histories", "--no-edit",
-      "-m", "PKB export " .. plan.name .. ": record the exported copy (no files changed)", head },
+    { "git", "update-ref", ref, "FETCH_HEAD" },
   }) do
     local _, err = run(cmd, root)
     if err then
       return false, ("%s; but recording it in the PKB failed (%s): %s"):format(done, table.concat(cmd, " "), err)
     end
   end
-  return true, ("%s; recorded in the PKB's history. To import notes taken in a copy of it: git -C %s pull <copy>")
-    :format(done, root)
+  return true, ("%s; recorded as %s. To bring notes taken in a copy of it back: :PKBImport <copy> on the export page")
+    :format(done, ref)
+end
+
+---------------------------------------------------------------- import
+--- Brings the changes made in a copy of an export (default: the export folder) into the PKB as one commit.
+--- Each file is merged three ways: as exported (or as last imported) / at home / in the copy. Conflicts are left
+--- to git (the commit message is ready in SQUASH_MSG); the copy's history is not imported.
+--- @return boolean ok
+--- @return string message
+function M.import(def_file, def_lines, source)
+  local def = M.parse(def_lines or read_file(def_file))
+  if not def then return false, "not an export page (no export:: line)" end
+  local root = pkb_root()
+  local ok, why_not = pkb_repo(root)
+  if not ok then return false, "cannot import: " .. why_not end
+  local ref = M.ref(def.name)
+  local base = run({ "git", "rev-parse", "-q", "--verify", ref .. "^{commit}" }, root)
+  if not base then return false, ("no export of '%s' recorded in the PKB (%s); export it first"):format(def.name, ref) end
+  if not run({ "git", "diff", "--quiet" }, root) or not run({ "git", "diff", "--cached", "--quiet" }, root) then
+    return false, "the PKB has uncommitted changes; commit or stash them first"
+  end
+
+  source = source and source ~= "" and source or default_out(def)
+  local _, err = run({ "git", "fetch", "-q", source, "HEAD" }, root)
+  if err then return false, ("fetching %s failed: %s"):format(source, err) end
+  local copy = run({ "git", "rev-parse", "FETCH_HEAD" }, root)
+  if copy == base then return true, ("nothing new in %s since the export or the last import"):format(source) end
+  if not run({ "git", "merge-base", "--is-ancestor", base, copy }, root) then
+    return false, ("%s is not a copy of this export (its history does not contain %s)"):format(source, ref)
+  end
+
+  local res = vim.system({ "git", "merge-recursive", base, "--", "HEAD", copy }, { cwd = root, text = true }):wait()
+  if res.code > 1 then
+    return false, "merging failed: " .. vim.trim((res.stderr or "") .. (res.stdout or ""))
+  end
+  run({ "git", "update-ref", ref, copy, base }, root) -- the next import starts from here
+  local message = ("PKB import %s: travel update"):format(def.name)
+
+  if res.code == 1 then
+    local conflicts = run({ "git", "diff", "--name-only", "--diff-filter=U" }, root) or ""
+    local msg_file = run({ "git", "rev-parse", "--git-path", "SQUASH_MSG" }, root)
+    vim.fn.writefile({ message }, (msg_file:match("^/") and "" or root .. "/") .. msg_file)
+    return true, ("conflicts in %s: resolve them with git, then git commit (the message is ready). To start over: "
+      .. "git reset --hard HEAD && git update-ref %s %s"):format(conflicts:gsub("\n", ", "), ref, base)
+  end
+  if run({ "git", "diff", "--cached", "--quiet" }, root) then
+    return true, ("nothing to change in the PKB from %s"):format(source)
+  end
+  local _, cerr = run({ "git", "commit", "-q", "-m", message }, root)
+  if cerr then return false, "committing failed: " .. cerr end
+  local files = run({ "git", "diff", "--name-only", "HEAD^", "HEAD" }, root) or ""
+  return true, ("imported %d changed files from %s as one commit (%s)")
+    :format(#vim.split(files, "\n", { trimempty = true }), source, run({ "git", "rev-parse", "--short", "HEAD" }, root))
 end
 
 ---------------------------------------------------------------- report
@@ -634,6 +690,18 @@ function M.report_lines(plan)
     for _, f in ipairs(plan.forbidden) do add_rel(("  %s:%d  %s"):format(f.rel, f.line, f.word), f.rel) end
   end
   return lines, map
+end
+
+--- :PKBImport [copy] — import the notes taken in a copy of the export defined by the current buffer.
+function M.import_command(source, buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  if not M.parse(lines) then
+    vim.notify("[PKB] Not an export page: add an export::<name> line", vim.log.levels.WARN)
+    return
+  end
+  local ok, msg = M.import(vim.api.nvim_buf_get_name(buf), lines, source)
+  vim.notify("[PKB] " .. msg, ok and vim.log.levels.INFO or vim.log.levels.ERROR)
 end
 
 --- :PKBExport — plan the export defined by the current buffer and show the report.
