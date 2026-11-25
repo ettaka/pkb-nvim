@@ -598,23 +598,56 @@ end
 --- to git (the commit message is ready in SQUASH_MSG); the copy's history is not imported.
 --- @return boolean ok
 --- @return string message
+--- Checks and fetches for an import: the PKB root and the fetched copy's commit, or nil and an error.
+local function prepare_import(source)
+  local root = pkb_root()
+  local ok, why_not = pkb_repo(root)
+  if not ok then return nil, "cannot import: " .. why_not end
+  if not run({ "git", "diff", "--quiet" }, root) or not run({ "git", "diff", "--cached", "--quiet" }, root) then
+    return nil, "the PKB has uncommitted changes; commit or stash them first"
+  end
+  local _, err = run({ "git", "fetch", "-q", source, "HEAD" }, root)
+  if err then return nil, ("fetching %s failed: %s"):format(source, err) end
+  return root, run({ "git", "rev-parse", "FETCH_HEAD" }, root)
+end
+
+--- Import from a copy of the export defined by an export page. source defaults to the export folder.
 function M.import(def_file, def_lines, source)
   local def = M.parse(def_lines or read_file(def_file))
   if not def then return false, "not an export page (no export:: line)" end
-  local root = pkb_root()
-  local ok, why_not = pkb_repo(root)
-  if not ok then return false, "cannot import: " .. why_not end
-  local ref = M.ref(def.name)
-  local base = run({ "git", "rev-parse", "-q", "--verify", ref .. "^{commit}" }, root)
-  if not base then return false, ("no export of '%s' recorded in the PKB (%s); export it first"):format(def.name, ref) end
-  if not run({ "git", "diff", "--quiet" }, root) or not run({ "git", "diff", "--cached", "--quiet" }, root) then
-    return false, "the PKB has uncommitted changes; commit or stash them first"
-  end
-
   source = source and source ~= "" and source or default_out(def)
-  local _, err = run({ "git", "fetch", "-q", source, "HEAD" }, root)
-  if err then return false, ("fetching %s failed: %s"):format(source, err) end
-  local copy = run({ "git", "rev-parse", "FETCH_HEAD" }, root)
+  local ref = M.ref(def.name)
+  if pkb_repo(pkb_root()) and not run({ "git", "rev-parse", "-q", "--verify", ref .. "^{commit}" }, pkb_root()) then
+    return false, ("no export of '%s' recorded in the PKB (%s); export it first"):format(def.name, ref)
+  end
+  local root, copy = prepare_import(source)
+  if not root then return false, copy end
+  return M.merge_copy(root, ref, def.name, source, copy)
+end
+
+--- Import from a copy of any recorded export: the export whose ref is in the copy's history.
+function M.import_from(source)
+  local root, copy = prepare_import(source)
+  if not root then return false, copy end
+  local refs = vim.split(run({ "git", "for-each-ref", "--format=%(refname)", "refs/pkb-export/" }, root) or "", "\n",
+    { trimempty = true })
+  local found = {}
+  for _, ref in ipairs(refs) do
+    if run({ "git", "merge-base", "--is-ancestor", ref, copy }, root) then table.insert(found, ref) end
+  end
+  if #found == 0 then
+    return false, ("%s is not a copy of any export recorded in the PKB (%d recorded)"):format(source, #refs)
+  end
+  if #found > 1 then
+    return false, ("%s matches several exports (%s); run :PKBImport on the export page"):format(source,
+      table.concat(found, ", "))
+  end
+  return M.merge_copy(root, found[1], found[1]:match("^refs/pkb%-export/(.*)$"), source, copy)
+end
+
+--- Merges the fetched copy into the PKB against the export's ref and commits the result as one commit.
+function M.merge_copy(root, ref, name, source, copy)
+  local base = run({ "git", "rev-parse", ref }, root)
   if copy == base then return true, ("nothing new in %s since the export or the last import"):format(source) end
   if not run({ "git", "merge-base", "--is-ancestor", base, copy }, root) then
     return false, ("%s is not a copy of this export (its history does not contain %s)"):format(source, ref)
@@ -625,7 +658,7 @@ function M.import(def_file, def_lines, source)
     return false, "merging failed: " .. vim.trim((res.stderr or "") .. (res.stdout or ""))
   end
   run({ "git", "update-ref", ref, copy, base }, root) -- the next import starts from here
-  local message = ("PKB import %s: travel update"):format(def.name)
+  local message = ("PKB import %s: travel update"):format(name)
 
   if res.code == 1 then
     local conflicts = run({ "git", "diff", "--name-only", "--diff-filter=U" }, root) or ""
@@ -693,14 +726,21 @@ function M.report_lines(plan)
 end
 
 --- :PKBImport [copy] — import the notes taken in a copy of the export defined by the current buffer.
+--- On an export page: that export (default copy: its folder). Elsewhere: the export the given copy belongs to.
 function M.import_command(source, buf)
   buf = buf or vim.api.nvim_get_current_buf()
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  if not M.parse(lines) then
-    vim.notify("[PKB] Not an export page: add an export::<name> line", vim.log.levels.WARN)
+  source = source ~= "" and source or nil
+  local ok, msg
+  if M.parse(lines) then
+    ok, msg = M.import(vim.api.nvim_buf_get_name(buf), lines, source)
+  elseif source then
+    ok, msg = M.import_from(source)
+  else
+    vim.notify("[PKB] Give the copy to import: :PKBImport <copy> (a path or ssh:// URL), "
+      .. "or run :PKBImport on the export page to import from its folder", vim.log.levels.WARN)
     return
   end
-  local ok, msg = M.import(vim.api.nvim_buf_get_name(buf), lines, source)
   vim.notify("[PKB] " .. msg, ok and vim.log.levels.INFO or vim.log.levels.ERROR)
 end
 

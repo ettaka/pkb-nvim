@@ -125,8 +125,8 @@ commit** (`PKB import <name>: travel update`); the copy's own commits are not im
 git -C ~/pkb push backup
 # travel device: a clone of the export is its PKB (PKB_ROOT=~/pkb there); commit notes as usual
 git clone ssh://home/~/pkb-export/travel ~/pkb
-# home, after the trip: open the export page and
-:PKBImport ssh://travel/~/pkb      " or pull the copy into the export folder and run :PKBImport
+# home, after the trip (from any buffer; the copy's history tells which export it belongs to)
+:PKBImport ssh://travel/~/pkb      " a path, ssh:// URL or bare repo; on the export page, no argument = its folder
 ```
 
 - Each file is merged three ways: as exported (or as last imported) / at home / in the copy. Lines changed
