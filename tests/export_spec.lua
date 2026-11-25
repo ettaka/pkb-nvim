@@ -611,6 +611,47 @@ t.test(":PKBImport <copy> from any buffer: a repo that is not a copy of any expo
   H.has(H.messages[#H.messages], "not a copy of any export")
 end)
 
+-- Exports written before the import feature were not recorded in the PKB; their copies still start with the
+-- exported commit ("PKB export: <name>", with the .pkb-export marker), which then serves as the base.
+local function old_export()
+  local root, def_file, out = git_pkb()
+  assert(require("pkb.export").write(plan_for(def_file)))
+  git_ok(root, "update-ref", "-d", "refs/pkb-export/review") -- as an older version left it
+  local tr = travel(out)
+  H.write(tr .. "/b.md", { "# B", "Next: c#Details", "", "## Notes", "- first", "- added while travelling" })
+  commit_all(tr, "travel notes")
+  return root, def_file, tr
+end
+
+t.test("import of an export made before recording: from any buffer, the copy's first commit is the base", function()
+  local root, _, tr = old_export()
+  local ok, msg = require("pkb.export").import_from(tr)
+  H.eq(ok, true, msg)
+  H.has(msg, "earlier export")
+  H.eq(read(root .. "/b.md"), { "# B", "Next: [[c#Details]]", "", "## Notes", "- first", "- added while travelling" })
+  H.eq(subjects(root)[1], "PKB import review: travel update")
+  H.eq(git(root, "rev-parse", "refs/pkb-export/review"), git(tr, "rev-parse", "HEAD"), "recorded for next time")
+end)
+
+t.test("import of an export made before recording: also on the export page", function()
+  local root, def_file, tr = old_export()
+  local ok, msg = import(def_file, tr)
+  H.eq(ok, true, msg)
+  H.eq(read(root .. "/b.md")[6], "- added while travelling")
+end)
+
+t.test("import of an unrecorded export: a copy whose first commit is not an export is refused", function()
+  local root = git_pkb()
+  local stranger = H.tmpdir()
+  H.write(stranger .. "/x.md", { "x" })
+  git_ok(stranger, "init", "-q")
+  commit_all(stranger, "PKB export: fake (no marker)")
+  local ok, err = require("pkb.export").import_from(stranger)
+  H.eq(ok, false)
+  H.has(err, "not a copy of any export")
+  H.ok(root)
+end)
+
 t.test(":PKBImport without a copy outside an export page says what to give", function()
   local root = git_pkb()
   vim.cmd.source(H.root .. "/plugin/pkb.lua")

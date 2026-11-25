@@ -611,18 +611,38 @@ local function prepare_import(source)
   return root, run({ "git", "rev-parse", "FETCH_HEAD" }, root)
 end
 
+--- For a copy of an export that was never recorded in the PKB (written before exports were recorded): its first
+--- commit is the exported commit ("PKB export: <name>", with the marker file). Records it as the export's ref.
+--- @return string|nil ref, string name
+local function adopt_earlier_export(root, copy, want_name)
+  local roots = vim.split(run({ "git", "rev-list", "--max-parents=0", copy }, root) or "", "\n", { trimempty = true })
+  for _, commit in ipairs(roots) do
+    local name = (run({ "git", "log", "-1", "--format=%s", commit }, root) or ""):match("^PKB export: (.+)$")
+    if name and run({ "git", "cat-file", "-e", commit .. ":" .. M.MARKER }, root)
+        and (not want_name or slug(name) == slug(want_name)) then
+      local ref = M.ref(name)
+      if run({ "git", "update-ref", ref, commit }, root) then return ref, name end
+    end
+  end
+end
+
 --- Import from a copy of the export defined by an export page. source defaults to the export folder.
 function M.import(def_file, def_lines, source)
   local def = M.parse(def_lines or read_file(def_file))
   if not def then return false, "not an export page (no export:: line)" end
   source = source and source ~= "" and source or default_out(def)
   local ref = M.ref(def.name)
-  if pkb_repo(pkb_root()) and not run({ "git", "rev-parse", "-q", "--verify", ref .. "^{commit}" }, pkb_root()) then
-    return false, ("no export of '%s' recorded in the PKB (%s); export it first"):format(def.name, ref)
-  end
+  local recorded = pkb_repo(pkb_root()) and run({ "git", "rev-parse", "-q", "--verify", ref .. "^{commit}" }, pkb_root())
+  local not_recorded = ("no export of '%s' recorded in the PKB (%s), and %s does not start with it; export it first")
+    :format(def.name, ref, source)
   local root, copy = prepare_import(source)
-  if not root then return false, copy end
-  return M.merge_copy(root, ref, def.name, source, copy)
+  if not root then return false, recorded and copy or not_recorded end
+  local note
+  if not recorded then
+    if not adopt_earlier_export(root, copy, def.name) then return false, not_recorded end
+    note = "earlier export, recorded from the copy's first commit"
+  end
+  return M.merge_copy(root, ref, def.name, source, copy, note)
 end
 
 --- Import from a copy of any recorded export: the export whose ref is in the copy's history.
@@ -636,7 +656,12 @@ function M.import_from(source)
     if run({ "git", "merge-base", "--is-ancestor", ref, copy }, root) then table.insert(found, ref) end
   end
   if #found == 0 then
-    return false, ("%s is not a copy of any export recorded in the PKB (%d recorded)"):format(source, #refs)
+    local ref, name = adopt_earlier_export(root, copy)
+    if ref then
+      return M.merge_copy(root, ref, name, source, copy, "earlier export, recorded from the copy's first commit")
+    end
+    return false, ("%s is not a copy of any export recorded in the PKB (%d recorded), nor of an earlier one")
+      :format(source, #refs)
   end
   if #found > 1 then
     return false, ("%s matches several exports (%s); run :PKBImport on the export page"):format(source,
@@ -646,7 +671,13 @@ function M.import_from(source)
 end
 
 --- Merges the fetched copy into the PKB against the export's ref and commits the result as one commit.
-function M.merge_copy(root, ref, name, source, copy)
+function M.merge_copy(root, ref, name, source, copy, note)
+  local ok, msg = M._merge_copy(root, ref, name, source, copy)
+  if note then msg = msg .. " (" .. note .. ")" end
+  return ok, msg
+end
+
+function M._merge_copy(root, ref, name, source, copy)
   local base = run({ "git", "rev-parse", ref }, root)
   if copy == base then return true, ("nothing new in %s since the export or the last import"):format(source) end
   if not run({ "git", "merge-base", "--is-ancestor", base, copy }, root) then

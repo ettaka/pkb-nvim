@@ -138,6 +138,8 @@ git clone ssh://home/~/pkb-export/travel ~/pkb
   change right next to such a line: git treats touching changes as one.
 - `_external/` copies and the `.pkb-export` marker stay out of the PKB. Importing again brings only what is new
   since the last import.
+- Exports written before exports were recorded can be imported too: a copy of an export starts with the exported
+  commit (`PKB export: <name>`, with the `.pkb-export` marker), which is then used and recorded as the base.
 - `:PKBImport` refuses while the PKB has uncommitted changes, and a later export to the same folder refuses while
   that folder has commits that are not yet imported.
 
